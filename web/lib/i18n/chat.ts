@@ -90,6 +90,20 @@ const en: Record<string, string> = {
   "Запомнить этот браузер на 30 дней": "Remember this browser for 30 days",
   "Подтвердить": "Verify",
   "Войти": "Sign in",
+  "Убрать": "Remove",
+  "Ответить на выделенное": "Reply to selection",
+  "Карандаш": "Pen",
+  "Прямоугольник": "Rectangle",
+  "Овал": "Ellipse",
+  "Стрелка": "Arrow",
+  "Текст": "Text",
+  "Обрезать": "Crop",
+  "Повернуть": "Rotate",
+  "Отменить (⌘Z)": "Undo (⌘Z)",
+  "Готово": "Done",
+  "текст": "text",
+  "открываю картинку…": "opening image…",
+  "скачать": "download",
 };
 
 export default en;

@@ -21,7 +21,7 @@ export function UserMessage() {
   return (
     <MessagePrimitive.Root className="group flex flex-col items-end gap-1">
       <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-[var(--panel-2)] px-4 py-2.5 leading-relaxed">
-        <MessagePrimitive.Parts />
+        <MessagePrimitive.Parts components={{ Image: UserImage }} />
       </div>
       <ActionBarPrimitive.Root hideWhenRunning autohide="never" className="flex gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
         <ActionBarPrimitive.Edit className={iconBtn} title={t("Изменить и переотправить")}>
@@ -33,6 +33,11 @@ export function UserMessage() {
       </ActionBarPrimitive.Root>
     </MessagePrimitive.Root>
   );
+}
+
+// Вставленная пользователем картинка (localImage) — миниатюра из файла харнесса.
+function UserImage({ image }: { image: string }) {
+  return <div className="mb-1.5"><LocalImage path={image} size="sm" /></div>;
 }
 
 export function UserEditComposer() {

@@ -1,5 +1,6 @@
 // Картинки из файлов харнесса (генерации, вложения): браузер тянет их через fs/readFile окна и показывает миниатюрами.
 import { createContext, useContext, useEffect, useState } from "react";
+import { t } from "@/lib/i18n";
 import { Icon } from "./icons";
 
 type Reader = (path: string) => Promise<string>; // → data: URL
@@ -54,7 +55,7 @@ export function LocalImage({ path, alt, size = "md" }: { path: string; alt?: str
           <div className="flex items-center gap-3 font-mono text-xs text-[var(--muted)]" onClick={(e) => e.stopPropagation()}>
             <span>{path}</span>
             <a href={src} download={path.split("/").pop()} className="flex items-center gap-1 rounded-md border border-[var(--border)] px-2 py-1 hover:text-[var(--fg)]">
-              <Icon name="arrowUp" size={12} className="rotate-180" /> скачать
+              <Icon name="arrowUp" size={12} className="rotate-180" /> {t("скачать")}
             </a>
           </div>
         </div>

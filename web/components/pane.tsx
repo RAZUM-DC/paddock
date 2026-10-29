@@ -11,13 +11,14 @@ import {
   type AppendMessage,
 } from "@assistant-ui/react";
 import type { ServerRequest } from "@/lib/codex-client";
-import { actionsOf, changedFiles, itemToPart, toThreadMessage, turnsToMessages, userText, type Action, type ChangedFile, type Msg, type Part, type TurnMeta } from "@/lib/messages";
+import { actionsOf, changedFiles, itemToPart, toThreadMessage, turnsToMessages, userParts, userText, type Action, type ChangedFile, type Msg, type Part, type TurnMeta } from "@/lib/messages";
 import { t } from "@/lib/i18n";
 import { store } from "@/lib/store";
 import { Icon } from "./icons";
 import { ImageReader, makeReader } from "./local-image";
 import { Approval, AssistantMessage, UserEditComposer, UserMessage } from "./messages";
 import { ModelPicker, type Model, type Selection } from "./model-picker";
+import { ImageEditor } from "./image-editor";
 import { SessionTools } from "./tools";
 import { StatusBar, type RateLimits, type TokenUsage } from "./status-bar";
 
@@ -135,13 +136,13 @@ export const Pane = memo(function Pane({ handleRef, api, connected, models, ndMo
   }, [patchMeta]);
 
   // Пара сообщений хода появляется по первому сигналу — ответу turn/start или событию userMessage, что раньше.
-  const ensureTurn = useCallback((tId: string, text: string) => {
+  const ensureTurn = useCallback((tId: string, parts: Part[]) => {
     setMessages((ms) =>
       ms.some((m) => m.id === `a-${tId}`)
         ? ms
         : [
             ...ms.filter((m) => m.id !== "u-pending"),
-            { id: `u-${tId}`, role: "user", turnId: tId, parts: [{ type: "text", itemId: `u-${tId}`, text }] },
+            { id: `u-${tId}`, role: "user", turnId: tId, parts },
             { id: `a-${tId}`, role: "assistant", turnId: tId, parts: [], running: !finished.current.has(tId), meta: meta.current[tId] },
           ],
     );
@@ -192,7 +193,7 @@ export const Pane = memo(function Pane({ handleRef, api, connected, models, ndMo
       case "item/started":
       case "item/completed": {
         if (p.item.type === "userMessage") {
-          ensureTurn(p.turnId, userText(p.item));
+          ensureTurn(p.turnId, userParts(p.item));
           break;
         }
         firstToken(p.turnId);
@@ -286,19 +287,32 @@ export const Pane = memo(function Pane({ handleRef, api, connected, models, ndMo
     onState({ threadId, running: turnId !== null, waiting: approvals.length > 0, files: filesRef.current, actions: actionsRef.current, cwd: ctx.cwd, model: selRef.current?.model ?? null });
   }, [threadId, turnId, approvals.length, filesKey, actionsKey, ctx.cwd, onState]);
 
-  const startTurn = async (text: string) => {
+  // Вложения поля ввода: картинки из буфера (уже лежат файлом в харнессе) и свёрнутые длинные вставки.
+  const [images, setImages] = useState<{ path: string; url: string }[]>([]);
+  const [pastes, setPastes] = useState<{ n: number; text: string; lines: number }[]>([]);
+  const pasteN = useRef(0);
+  const [editing, setEditing] = useState<string | null>(null); // data: URL картинки в редакторе
+  const pasteToken = (p: { n: number; lines: number }) => `[Pasted text #${p.n} +${p.lines} lines]`;
+
+  const startTurn = async (typed: string) => {
+    // Токены вставок → полный текст; картинки уходят отдельными localImage.
+    const text = pastes.reduce((acc, p) => acc.replace(pasteToken(p), p.text), typed);
+    const imgs = images.map((i) => i.path);
+    setPastes([]);
+    setImages([]);
+    const parts = (itemId: string): Part[] => [...imgs.map((path, i) => ({ type: "image" as const, itemId: `${itemId}-img${i}`, path })), { type: "text", itemId, text }];
     // Пузырь сообщения сразу, не дожидаясь thread/start и turn/start (в новом чате это секунды); ensureTurn заменит его настоящим.
-    setMessages((ms) => [...ms.filter((m) => m.id !== "u-pending"), { id: "u-pending", role: "user", turnId: "", parts: [{ type: "text", itemId: "u-pending", text }] }]);
+    setMessages((ms) => [...ms.filter((m) => m.id !== "u-pending"), { id: "u-pending", role: "user", turnId: "", parts: parts("u-pending") }]);
     toBottom();
     try {
-      await startTurnNow(text);
+      await startTurnNow(text, imgs, parts);
     } catch (e) {
       setMessages((ms) => ms.filter((m) => m.id !== "u-pending"));
       throw e;
     }
   };
 
-  const startTurnNow = async (text: string) => {
+  const startTurnNow = async (text: string, imgs: string[] = [], parts: (itemId: string) => Part[] = (itemId) => [{ type: "text", itemId, text }]) => {
     const s = selRef.current;
     const provider = s?.provider ?? "openai";
     let tid = threadIdRef.current;
@@ -324,13 +338,13 @@ export const Pane = memo(function Pane({ handleRef, api, connected, models, ndMo
     const startedAt = Date.now();
     const res = await api.request("turn/start", {
       threadId: tid,
-      input: [{ type: "text", text, text_elements: [] }],
+      input: [...imgs.map((path) => ({ type: "localImage", path })), { type: "text", text, text_elements: [] }],
       model: s?.model,
       effort: s?.effort || null,
     });
     const id = res.turn.id as string;
     patchMeta(id, { model: s?.model, effort: s?.effort, startedAt });
-    ensureTurn(id, text);
+    ensureTurn(id, parts(`u-${id}`));
     toBottom();
     if (!finished.current.has(id)) setTurnId(id);
     onThreadsChanged();
@@ -352,7 +366,7 @@ export const Pane = memo(function Pane({ handleRef, api, connected, models, ndMo
     messages,
     isRunning: turnId !== null,
     convertMessage: toThreadMessage,
-    onNew: async (m) => { const t = textOf(m); if (t) await startTurn(t); },
+    onNew: async (m) => { const tx = textOf(m); if (tx || images.length) await startTurn(tx); },
     onEdit: async (m) => { const t = textOf(m); if (t && m.sourceId) await rerun(m.sourceId, t); },
     onReload: async (parentId) => {
       const m = messages.find((x) => x.id === parentId);
@@ -373,11 +387,96 @@ export const Pane = memo(function Pane({ handleRef, api, connected, models, ndMo
   const empty = messages.length === 0;
   const width = compact ? "max-w-none" : "max-w-3xl";
 
+  // Вставка: картинка → редактор (как разметка в macOS) → файл в <папка>/.paddock/uploads/<тред>/;
+  // длинный текст (больше 10 строк) → чип [Pasted text #N +M lines], полный текст уйдёт при отправке — как в Claude Code.
+  const onPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const file = [...e.clipboardData.items].find((i) => i.kind === "file" && i.type.startsWith("image/"))?.getAsFile();
+    if (file) {
+      e.preventDefault();
+      const r = new FileReader();
+      r.onload = () => setEditing(String(r.result));
+      r.readAsDataURL(file);
+      return;
+    }
+    const text = e.clipboardData.getData("text/plain");
+    const lines = text.split("\n").length;
+    if (lines <= 10) return;
+    e.preventDefault();
+    const paste = { n: ++pasteN.current, text, lines };
+    setPastes((ps) => [...ps, paste]);
+    document.execCommand("insertText", false, pasteToken(paste));
+  };
+
+  const saveImage = async (png: Blob, url: string) => {
+    setEditing(null);
+    const dir = `${ctx.cwd ?? CWD}/.paddock/uploads/${threadIdRef.current ?? "new"}`;
+    const path = `${dir}/${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}.png`;
+    const bytes = new Uint8Array(await png.arrayBuffer());
+    let bin = "";
+    for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    await api.request("fs/createDirectory", { path: dir, recursive: true });
+    await api.request("fs/writeFile", { path, dataBase64: btoa(bin) });
+    setImages((is) => [...is, { path, url }]);
+  };
+
+  const removePaste = (n: number) => {
+    const p = pastes.find((x) => x.n === n);
+    if (!p) return;
+    const c = runtime.thread.composer;
+    c.setText(c.getState().text.replace(pasteToken(p), ""));
+    setPastes((ps) => ps.filter((x) => x.n !== n));
+  };
+
+  // Ответить на выделенное: выделил кусок ответа → кнопка → цитата «> …» в поле ввода, текст заодно в буфере (как мод quote-reply).
+  const paneRef = useRef<HTMLElement>(null);
+  const [quote, setQuote] = useState<{ text: string; x: number; y: number } | null>(null);
+  const onMouseUp = () => {
+    const sel = window.getSelection();
+    const text = sel?.toString().trim() ?? "";
+    if (!sel || !text || !viewport.current?.contains(sel.anchorNode)) return setQuote(null);
+    const r = sel.getRangeAt(0).getBoundingClientRect();
+    const box = paneRef.current!.getBoundingClientRect();
+    setQuote({ text, x: Math.min(Math.max(r.left - box.left + r.width / 2, 90), box.width - 90), y: r.top - box.top - 8 });
+  };
+  const replyToQuote = () => {
+    if (!quote) return;
+    navigator.clipboard?.writeText(quote.text).catch(() => {});
+    const c = runtime.thread.composer;
+    const cur = c.getState().text;
+    c.setText(`${quote.text.split("\n").map((l) => `> ${l}`).join("\n")}\n\n${cur}`);
+    setQuote(null);
+    window.getSelection()?.removeAllRanges();
+    setTimeout(() => paneRef.current?.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus(), 0);
+  };
+
   const composer = (
     <div className="space-y-2">
       {approvals.map((req) => <Approval key={req.id} req={req} onAnswer={answer} />)}
       <ComposerPrimitive.Root className="composer rounded-2xl border border-[var(--border)] bg-[var(--panel)] p-2 transition-colors focus-within:border-[var(--accent)]/40">
+        {(images.length > 0 || pastes.length > 0) && (
+          <div className="flex flex-wrap items-center gap-1.5 px-1.5 pt-1" data-attachments>
+            {images.map((im) => (
+              <span key={im.path} className="group/att relative">
+                <img src={im.url} alt="" title={im.path} className="h-14 w-14 rounded-lg border border-[var(--border)] object-cover" />
+                <button onClick={() => setImages((is) => is.filter((x) => x.path !== im.path))} title={t("Убрать")}
+                  className="absolute -right-1.5 -top-1.5 grid h-5 w-5 place-items-center rounded-full bg-[var(--panel-2)] text-[var(--muted)] opacity-0 shadow group-hover/att:opacity-100">
+                  <Icon name="plus" size={11} className="rotate-45" />
+                </button>
+              </span>
+            ))}
+            {pastes.map((p) => (
+              <span key={p.n} title={p.text.split("\n").slice(0, 12).join("\n")} data-paste-chip
+                className="flex items-center gap-1 rounded-lg border border-[var(--border)] bg-[var(--panel-2)] px-2 py-1 font-mono text-[11.5px] text-[var(--muted)]">
+                {pasteToken(p)}
+                <button onClick={() => removePaste(p.n)} title={t("Убрать")} className="rounded p-0.5 hover:text-[var(--fg)]">
+                  <Icon name="plus" size={11} className="rotate-45" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         <ComposerPrimitive.Input
+          onPaste={onPaste}
           autoFocus={active}
           placeholder={connected ? t("Что делаем?") : t("Нет связи с codex…")}
           className={`${compact ? "max-h-40 min-h-9" : "max-h-60 min-h-11"} w-full resize-none bg-transparent px-2.5 py-2 leading-relaxed outline-none placeholder:text-[var(--faint)]`}
@@ -414,8 +513,8 @@ export const Pane = memo(function Pane({ handleRef, api, connected, models, ndMo
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       <ImageReader.Provider value={readImage}>
-      <section onMouseDown={onFocus} onFocusCapture={onFocus}
-        className={`flex min-h-0 min-w-0 flex-1 flex-col ${compact ? `border-t-2 ${active ? "border-[var(--accent)]" : "border-transparent"}` : ""}`}>
+      <section ref={paneRef} onMouseDown={onFocus} onFocusCapture={onFocus} onMouseUp={onMouseUp}
+        className={`relative flex min-h-0 min-w-0 flex-1 flex-col ${compact ? `border-t-2 ${active ? "border-[var(--accent)]" : "border-transparent"}` : ""}`}>
         <header className="flex h-12 shrink-0 items-center gap-1 border-b border-[var(--border)]/60 px-2">
           {compact && (
             <button onPointerDown={onGrip} title={t("Перетащи, чтобы поменять окна местами")} data-grip
@@ -465,6 +564,14 @@ export const Pane = memo(function Pane({ handleRef, api, connected, models, ndMo
             </>
           )}
         </ThreadPrimitive.Root>
+        {quote && (
+          <button onMouseDown={(e) => e.preventDefault()} onClick={replyToQuote} data-quote-reply
+            className="absolute z-30 flex -translate-x-1/2 -translate-y-full items-center gap-1.5 rounded-lg border border-[var(--border)] bg-[var(--panel)] px-2.5 py-1.5 text-xs shadow-xl shadow-black/50 hover:border-[var(--accent)]/60"
+            style={{ left: quote.x, top: quote.y }}>
+            <span className="text-[var(--accent)]">❝</span> {t("Ответить на выделенное")}
+          </button>
+        )}
+        {editing && <ImageEditor src={editing} onCancel={() => setEditing(null)} onDone={(png, url) => void saveImage(png, url)} />}
       </section>
       </ImageReader.Provider>
     </AssistantRuntimeProvider>

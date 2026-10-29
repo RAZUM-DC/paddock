@@ -11,7 +11,9 @@ export type ToolArgs = { kind: ToolKind; title: string; durationMs: number | nul
 export type Part =
   | { type: "text"; itemId: string; text: string }
   | { type: "reasoning"; itemId: string; text: string }
-  | { type: "tool-call"; itemId: string; toolName: string; argsText: string; args: ToolArgs; result?: string; isError?: boolean };
+  | { type: "tool-call"; itemId: string; toolName: string; argsText: string; args: ToolArgs; result?: string; isError?: boolean }
+  // Картинка в сообщении пользователя (вставка из буфера → localImage); путь в доме харнесса.
+  | { type: "image"; itemId: string; path: string };
 
 // Что известно о ходе: какой моделью отвечали, сколько шёл. Модель в истории Codex не хранится,
 // поэтому её запоминаем сами (localStorage), а для старых ходов берём модель треда.
@@ -130,13 +132,18 @@ export function userText(item: any): string {
   return (item.content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n");
 }
 
+export function userParts(item: any): Part[] {
+  const images: Part[] = (item.content ?? []).filter((c: any) => c.type === "localImage").map((c: any, i: number) => ({ type: "image", itemId: `${item.id}-img${i}`, path: c.path }));
+  return [...images, { type: "text", itemId: item.id, text: userText(item) }];
+}
+
 export function turnsToMessages(turns: any[], meta: (turnId: string) => TurnMeta): Msg[] {
   const out: Msg[] = [];
   for (const turn of turns) {
     const parts: Part[] = [];
     for (const item of turn.items ?? []) {
       if (item.type === "userMessage") {
-        out.push({ id: `u-${turn.id}`, role: "user", turnId: turn.id, parts: [{ type: "text", itemId: item.id, text: userText(item) }] });
+        out.push({ id: `u-${turn.id}`, role: "user", turnId: turn.id, parts: userParts(item) });
       } else {
         const p = itemToPart(item);
         if (p) parts.push(p);
@@ -165,7 +172,9 @@ export function toThreadMessage(m: Msg): ThreadMessageLike {
     content: m.parts.map((p) =>
       p.type === "tool-call"
         ? { type: "tool-call", toolCallId: p.itemId, toolName: p.toolName, argsText: p.argsText, args: p.args, result: p.result, isError: p.isError }
-        : { type: p.type, text: p.text },
+        : p.type === "image"
+          ? { type: "image", image: p.path }
+          : { type: p.type, text: p.text },
     ),
   };
 }

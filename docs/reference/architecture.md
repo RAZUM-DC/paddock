@@ -31,7 +31,7 @@ flowchart LR
 
   subgraph host["Сервер (docker compose)"]
     edge["edge (nginx)\nединственный вход, 127.0.0.1:8088"]
-    web["web (Next.js + WS-мост)\nсессии, пароли, супервизор выкатки"]
+    web["web (Next.js + WS-мост)\nпароль + 2FA (TOTP), SQLite: пользователи, метрики ходов\nсупервизор выкатки"]
     subgraph core["сеть core (internal: без выхода в интернет)"]
       h1["harness-valera\nCodex app-server :4500\n~/.codex, /workspace"]
       h2["harness-<user>\n… свой токен, свои тома"]
@@ -67,6 +67,7 @@ browser ──HTTPS/WS──▶ edge(nginx) ──▶ web(Next.js, WS-мост) 
 | харнесс ↔ интернет | сеть `core` `internal: true`, единственный выход — egress | запрос напрямую падает |
 | харнесс ↔ LAN/хост/docker0 | egress не пускает приватные сети | curl на 192.168.x, хост — отказ |
 | пользователь ↔ пользователь | свой контейнер, свои тома, свой capability-токен | ⬜ общая сеть `core`, см. roadmap 3.9 |
+| вход в морду | пароль 12+ и 2FA (TOTP: Authy и др.), лимит попыток по IP клиента (X-Forwarded-For от Traefik/edge, доверены только приватные сети) | `tests/two-factor.mjs` |
 | браузер ↔ харнесс | токен только у морды, WS-мост проверяет cookie-сессию и Origin | 401 без cookie, 403 с чужого Origin |
 | морда ↔ egress API | API gost только в `core` и с паролем, который знает морда | 401 из харнесса |
 | контейнеры | `cap_drop: ALL`, `no-new-privileges`, лимиты памяти/CPU | compose |

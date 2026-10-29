@@ -3,7 +3,7 @@
 // Рабочая область: одно соединение с codex, сайдбар, аккаунт, настройки и до четырёх окон чата (pane.tsx).
 // События codex разлетаются по окнам, каждое берёт свои по threadId; одобрения идут в окно своего треда.
 import { createRef, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createAuthClient } from "better-auth/react";
+import { authClient } from "@/lib/auth-client";
 import { CodexClient, type ServerRequest } from "@/lib/codex-client";
 import { store } from "@/lib/store";
 import type { AccountInfo, Snapshot } from "./account";
@@ -338,7 +338,7 @@ function Workspace({ email }: { email: string }) {
   const loadUsage = useCallback(() => client.current!.request("account/usage/read", {}), []);
 
   const logout = async () => {
-    await createAuthClient().signOut();
+    await authClient.signOut();
     window.location.href = "/login";
   };
 

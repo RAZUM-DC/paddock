@@ -45,22 +45,54 @@ export function ToolsTab({ request }: { request: Request }) {
         </div>
         {!skills && !error && <p className="text-sm text-[var(--faint)]">читаю скиллы…</p>}
         {skills && skills.length === 0 && <p className="text-sm text-[var(--faint)]">скиллов нет</p>}
-        <div className="divide-y divide-[var(--border)] rounded-xl border border-[var(--border)]">
-          {skills?.map((s) => (
-            <label key={s.path} className="flex items-start gap-3 px-3 py-2 text-sm">
-              <input type="checkbox" checked={s.enabled} className="mt-0.5 h-4 w-4 accent-[var(--accent)]"
-                onChange={(e) => setSkillEnabled(request, s, e.target.checked).then(() => reloadSkills(true)).catch((err) => setError(err.message))} />
-              <span className="min-w-0 flex-1">
-                <span className="font-mono text-[13px]">{s.name}</span>
-                <span className="ml-2 text-[11px] text-[var(--faint)]">{scopeLabel[s.scope] ?? s.scope}{paddockSkills.has(s.name) ? " · Paddock" : ""}</span>
-                <span className="block truncate text-xs text-[var(--muted)]" title={s.description}>{s.description}</span>
-              </span>
-            </label>
-          ))}
-        </div>
+        {skills && groupSkills(skills, paddockSkills).map((g) => (
+          <SkillGroup key={g.title} title={g.title} skills={g.skills} open={g.open}
+            toggle={(list, on) => Promise.all(list.map((x) => setSkillEnabled(request, x, on))).then(() => reloadSkills(true)).catch((err) => setError(err.message))} />
+        ))}
         <p className="text-xs text-[var(--faint)]">Скиллы проекта (папка <span className="font-mono">.codex/skills</span> в репо) видны в окне чата этого проекта, значок под полем ввода.</p>
       </section>
     </div>
+  );
+}
+
+// Группы: Paddock, свои, по плагину (префикс до «:» — openai-templates и т. п.), системные. Большие плагинные — свёрнуты.
+function groupSkills(skills: Skill[], paddock: Set<string>) {
+  const groups = new Map<string, Skill[]>();
+  const add = (k: string, s: Skill) => groups.set(k, [...(groups.get(k) ?? []), s]);
+  for (const s of skills) {
+    if (paddock.has(s.name)) add("Paddock", s);
+    else if (s.name.includes(":")) add(s.name.split(":")[0], s);
+    else add(scopeLabel[s.scope] ? `${scopeLabel[s.scope][0].toUpperCase()}${scopeLabel[s.scope].slice(1)}` : s.scope, s);
+  }
+  const order = (t: string) => (t === "Paddock" ? 0 : t === "Свой" ? 1 : t === "Проект" ? 2 : t === "Системный" ? 9 : 5);
+  return [...groups.entries()]
+    .map(([title, list]) => ({ title, skills: list, open: order(title) < 5 }))
+    .sort((a, b) => order(a.title) - order(b.title) || a.title.localeCompare(b.title));
+}
+
+function SkillGroup({ title, skills, open, toggle }: { title: string; skills: Skill[]; open: boolean; toggle: (list: Skill[], on: boolean) => void }) {
+  const on = skills.filter((s) => s.enabled).length;
+  return (
+    <details open={open} className="group/g overflow-hidden rounded-xl border border-[var(--border)]">
+      <summary className="flex cursor-pointer list-none items-center gap-2 bg-[var(--panel-2)] px-3 py-2 text-sm">
+        <Icon name="chevron" size={12} className="-rotate-90 text-[var(--faint)] transition-transform group-open/g:rotate-0" />
+        <span className="flex-1 font-medium">{title}</span>
+        <span className="font-mono text-[11px] text-[var(--faint)]">{on}/{skills.length}</span>
+        <input type="checkbox" checked={on === skills.length} ref={(el) => { if (el) el.indeterminate = on > 0 && on < skills.length; }}
+          onClick={(e) => e.stopPropagation()} onChange={(e) => toggle(skills, e.target.checked)} title="Включить / выключить всю группу" className="h-4 w-4 accent-[var(--accent)]" />
+      </summary>
+      <div className="divide-y divide-[var(--border)]">
+        {skills.map((s) => (
+          <label key={s.path} className="flex items-start gap-3 px-3 py-2 text-sm">
+            <input type="checkbox" checked={s.enabled} className="mt-0.5 h-4 w-4 accent-[var(--accent)]" onChange={(e) => toggle([s], e.target.checked)} />
+            <span className="min-w-0 flex-1">
+              <span className="font-mono text-[13px]">{s.name.includes(":") ? s.name.split(":").slice(1).join(":") : s.name}</span>
+              <span className="block truncate text-xs text-[var(--muted)]" title={s.description}>{s.description}</span>
+            </span>
+          </label>
+        ))}
+      </div>
+    </details>
   );
 }
 

@@ -1,6 +1,7 @@
 // Настройки: вход в ChatGPT через device code прямо из морды, настройки Codex (config.toml в контейнере), пароль морды.
 import { useEffect, useState } from "react";
-import { createAuthClient } from "better-auth/react";
+import QRCode from "qrcode";
+import { authClient } from "@/lib/auth-client";
 import { maskEmail, type AccountInfo } from "./account";
 import { Icon } from "./icons";
 import { ToolsTab } from "./tools";
@@ -295,7 +296,7 @@ function WebTab({ email }: { email: string }) {
 
   const change = async (e: React.FormEvent) => {
     e.preventDefault();
-    const { error } = await createAuthClient().changePassword({ currentPassword: cur, newPassword: next, revokeOtherSessions: true });
+    const { error } = await authClient.changePassword({ currentPassword: cur, newPassword: next, revokeOtherSessions: true });
     if (error) return setStatus({ ok: false, text: error.message ?? "не получилось" });
     setCur("");
     setNext("");
@@ -303,6 +304,7 @@ function WebTab({ email }: { email: string }) {
   };
 
   return (
+    <div className="space-y-8">
     <form onSubmit={change} className="max-w-sm space-y-3" autoComplete="on">
       <h3 className="font-medium">Пароль морды</h3>
       {/* Логин для менеджера паролей: без него Chrome вписывает почту в первое попавшееся поле страницы — в поиск по чатам. */}
@@ -312,6 +314,97 @@ function WebTab({ email }: { email: string }) {
       <button disabled={!cur || next.length < 12} className={primary}>Сменить</button>
       {status && <div className={`text-sm ${status.ok ? "text-[var(--green)]" : "text-[var(--red)]"}`}>{status.text}</div>}
     </form>
+    <TwoFactor email={email} />
+    </div>
+  );
+}
+
+// 2FA по TOTP: пароль → QR для Authy → код из приложения подтверждает включение. Резервные коды показываем один раз.
+function TwoFactor({ email }: { email: string }) {
+  const session = authClient.useSession();
+  // Сессия в браузере обновляется не сразу — после включения/выключения статус держим сами.
+  const [override, setOverride] = useState<boolean | null>(null);
+  const enabled = override ?? !!(session.data?.user as { twoFactorEnabled?: boolean } | undefined)?.twoFactorEnabled;
+  const [pass, setPass] = useState("");
+  const [code, setCode] = useState("");
+  const [setup, setSetup] = useState<{ qr: string; secret: string; backup: string[] } | null>(null);
+  const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const run = async (fn: () => Promise<void>) => {
+    setBusy(true);
+    setStatus(null);
+    try {
+      await fn();
+    } catch (e) {
+      setStatus({ ok: false, text: e instanceof Error ? e.message : "не получилось" });
+    }
+    setBusy(false);
+  };
+
+  const start = () => run(async () => {
+    const { data, error } = await authClient.twoFactor.enable({ password: pass, issuer: "Paddock" });
+    if (error || !data) throw new Error(error?.status === 400 || error?.status === 401 ? "Неверный пароль" : error?.message ?? "не получилось");
+    if (!("totpURI" in data)) throw new Error("сервер не выдал TOTP");
+    const secret = new URL(data.totpURI).searchParams.get("secret") ?? "";
+    setSetup({ qr: await QRCode.toDataURL(data.totpURI, { margin: 1, width: 200 }), secret, backup: data.backupCodes });
+    setPass("");
+  });
+
+  const confirm = () => run(async () => {
+    const { error } = await authClient.twoFactor.verifyTotp({ code: code.replace(/\s+/g, "") });
+    if (error) throw new Error("Код не подошёл — проверь время на телефоне и попробуй следующий");
+    setCode("");
+    setOverride(true);
+    setStatus({ ok: true, text: "2FA включена. Сохрани резервные коды — они показываются один раз." });
+  });
+
+  const disable = () => run(async () => {
+    const { error } = await authClient.twoFactor.disable({ password: pass });
+    if (error) throw new Error(error.status === 400 || error.status === 401 ? "Неверный пароль" : error.message ?? "не получилось");
+    setPass("");
+    setSetup(null);
+    setOverride(false);
+    setStatus({ ok: true, text: "2FA выключена" });
+  });
+
+  return (
+    <div className="max-w-md space-y-3">
+      <h3 className="flex items-center gap-2 font-medium">
+        Двухфакторный вход
+        <span className={`text-xs ${enabled ? "text-[var(--green)]" : "text-[var(--faint)]"}`}>{enabled ? "включён" : "выключен"}</span>
+      </h3>
+      <p className="text-sm text-[var(--muted)]">Код из Authy, Google Authenticator или 1Password при каждом входе (или раз в 30 дней на доверенном браузере).</p>
+      {!setup && (
+        <form onSubmit={(e) => { e.preventDefault(); void (enabled ? disable() : start()); }} className="flex gap-2">
+          <input type="text" name="username" autoComplete="username" value={email} readOnly hidden />
+          <input type="password" value={pass} onChange={(e) => setPass(e.target.value)} placeholder="пароль морды" autoComplete="current-password" className={field} />
+          <button disabled={!pass || busy} className={enabled ? secondary : primary}>{busy ? "…" : enabled ? "Выключить" : "Включить"}</button>
+        </form>
+      )}
+      {setup && !enabled && (
+        <div className="space-y-3 rounded-xl bg-[var(--panel-2)] p-3">
+          <p className="text-sm">1. В Authy: «+» → «Scan QR code». Не сканируется — введи ключ вручную.</p>
+          <div className="flex items-center gap-4">
+            <img src={setup.qr} alt="QR для приложения-аутентификатора" className="h-40 w-40 rounded-lg bg-white p-1" />
+            <code className="break-all font-mono text-xs text-[var(--muted)]">{setup.secret.replace(/(.{4})/g, "$1 ").trim()}</code>
+          </div>
+          <p className="text-sm">2. Введи 6 цифр из приложения:</p>
+          <form onSubmit={(e) => { e.preventDefault(); void confirm(); }} className="flex gap-2">
+            <input value={code} onChange={(e) => setCode(e.target.value)} inputMode="numeric" autoComplete="one-time-code" placeholder="123 456" className={`${field} text-center font-mono tracking-[0.3em]`} />
+            <button disabled={code.replace(/\s+/g, "").length !== 6 || busy} className={primary}>{busy ? "…" : "Подтвердить"}</button>
+          </form>
+        </div>
+      )}
+      {setup && (
+        <div className="space-y-2 rounded-xl border border-[var(--border)] p-3">
+          <p className="text-sm">Резервные коды — по одному на вход, если телефона нет под рукой:</p>
+          <div className="grid grid-cols-2 gap-1 font-mono text-sm">{setup.backup.map((c) => <span key={c}>{c}</span>)}</div>
+          <button type="button" onClick={() => navigator.clipboard.writeText(setup.backup.join("\n"))} className={secondary}>Скопировать</button>
+        </div>
+      )}
+      {status && <div className={`text-sm ${status.ok ? "text-[var(--green)]" : "text-[var(--red)]"}`}>{status.text}</div>}
+    </div>
   );
 }
 

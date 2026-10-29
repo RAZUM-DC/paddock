@@ -1,16 +1,19 @@
 // Next.js + WebSocket-мост: браузер (с сессией) ↔ /ws/codex ↔ harness-<user>:4500 (с capability-токеном).
 // Токены пользователей браузер не видит никогда.
-import { createServer, type IncomingHttpHeaders } from "node:http";
+import { Agent, createServer, type IncomingHttpHeaders } from "node:http";
 import { readFileSync } from "node:fs";
 import next from "next";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
 import { auth, ensureDb, harnessIdOf } from "./lib/auth";
+import { ensureHarness, provisioningEnabled } from "./lib/provision";
 
 const dev = process.env.NODE_ENV !== "production";
 const port = Number(process.env.PORT ?? 3000);
 const tokensDir = process.env.TOKENS_DIR ?? "/run/secrets/tokens";
 const codexHost = process.env.CODEX_HOST_TEMPLATE ?? "harness-{user}:4500";
 const publicUrl = process.env.PUBLIC_URL ?? `http://localhost:${port}`;
+// Harnesses are on private networks: never through HTTP(S)_PROXY, even with NODE_USE_ENV_PROXY=1.
+const direct = new Agent();
 
 function toHeaders(h: IncomingHttpHeaders): Headers {
   const out = new Headers();
@@ -41,14 +44,24 @@ server.on("upgrade", async (req, socket, head) => {
   let user: string, token: string;
   try {
     user = harnessIdOf(session.user);
+  } catch {
+    return reject("403 Forbidden");
+  }
+  try {
     token = readFileSync(`${tokensDir}/${user}.token`, "utf8").trim();
   } catch {
+    // No harness yet: with a provisioner, start making one (the UI polls /api/harness and shows "preparing").
+    if (provisioningEnabled()) {
+      ensureHarness({ id: user, email: session.user.email, name: session.user.name });
+      return reject("503 Service Unavailable");
+    }
     return reject("403 Forbidden");
   }
 
   wss.handleUpgrade(req, socket, head, (client) => {
     const upstream = new WebSocket(`ws://${codexHost.replace("{user}", user)}`, {
       headers: { Authorization: `Bearer ${token}` },
+      agent: direct,
     });
     // ws отдаёт сообщения Buffer'ами, а send(Buffer) по умолчанию шлёт бинарный фрейм —
     // app-server такие игнорирует, поэтому тип фрейма передаём явно.
@@ -70,6 +83,8 @@ server.on("upgrade", async (req, socket, head) => {
     upstream.on("close", closeBoth);
     upstream.on("error", (e) => {
       console.error(`harness-${user}: ${e.message}`);
+      // The container is gone or never started: a provisioner recreates it (idempotent, volumes are kept).
+      if (provisioningEnabled() && /ENOTFOUND|EAI_AGAIN|ECONNREFUSED|EHOSTUNREACH/.test(e.message)) ensureHarness({ id: user, email: session.user.email, name: session.user.name });
       closeBoth();
     });
   });

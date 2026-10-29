@@ -15,6 +15,7 @@ import type { Model, Selection } from "./model-picker";
 import { CWD, Pane, type PaneCommand, type PaneHandle, type PaneState } from "./pane";
 import { Settings, type LoginEvent } from "./settings";
 import { Sidebar, type ThreadInfo } from "./sidebar";
+import { WorkspaceStatus } from "./workspace-status";
 import type { RateLimits } from "./status-bar";
 
 const PANES = 4;
@@ -516,6 +517,7 @@ function Workspace({ email }: { email: string }) {
           {titleOf(states[drag.pane].threadId) ?? t("New chat")}
         </div>
       )}
+      <WorkspaceStatus connected={connected} />
       {settingsOpen && <Settings email={email} account={account} models={models} ndModels={ndModels} reloadNeuralDeep={loadNeuralDeep} request={request} loginEvent={loginEvent} onClose={() => setSettingsOpen(false)} />}
       {filesOpen && (
         <SidePanel tab={sideTab} setTab={chooseSideTab} act={act} states={states} visible={visible} activePane={activePane}

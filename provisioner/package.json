@@ -1,0 +1,11 @@
+{
+  "name": "paddock-provisioner",
+  "private": true,
+  "type": "module",
+  "description": "Creates per-user Paddock harness containers on demand, each in its own internal network. No dependencies.",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}

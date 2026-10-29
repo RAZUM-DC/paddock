@@ -11,3 +11,4 @@ updated: 2026-10-29
 - [harness/](harness/README.md) — the user's harness container (currently Codex app-server)
 - [egress/](egress/README.md) — the only way out to the internet: gost, proxy chain, API for the web UI
 - [edge/](edge/README.md) — nginx, the single entry point
+- [provisioner/](provisioner/README.md) — optional: creates a user's harness on demand, one internal network per user

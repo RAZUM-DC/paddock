@@ -41,3 +41,16 @@ jobs:
             test -f "$d/tool.json" && test -f "$d/SKILL.md" || { echo "missing tool.json or SKILL.md in $d"; exit 1; }
             bin=$(node -e "console.log(require('./$d/tool.json').bin)") && node --check "$d/$bin"
           done
+
+  provisioner:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: provisioner
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: unit and fake-Docker tests
+        run: npm test

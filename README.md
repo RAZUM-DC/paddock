@@ -4,7 +4,7 @@
 
 Paddock does not ship its own agent. It takes a ready-made harness (today Codex app-server, next OpenCode, Hermes and others), runs it per user behind network isolation and an egress proxy, and gives it a web UI that feels like working in a terminal: several agents in parallel, a statusline with every number that matters, quick edits, and nothing in between.
 
-![Four chats side by side](docs/img/paddock-4.png)
+![Four chats side by side](docs/img/grid-en.png)
 
 ## What it does
 
@@ -23,11 +23,11 @@ Paddock does not ship its own agent. It takes a ready-made harness (today Codex 
 
 | Image generation in a chat | Live action feed | Network: every proxy × every agent API |
 |---|---|---|
-| ![Image generation](docs/img/paddock-image.png) | ![Actions](docs/img/side-actions.png) | ![Network](docs/img/side-network.png) |
+| ![Image generation](docs/img/image-chat-en.png) | ![Actions](docs/img/side-actions-en.png) | ![Network](docs/img/side-network-en.png) |
 
 | Tools and skills | What this chat can use |
 |---|---|
-| ![Settings → Tools](docs/img/settings-tools.png) | ![Session tools](docs/img/session-tools.png) |
+| ![Settings → Tools](docs/img/settings-tools-en.png) | ![Session tools](docs/img/session-tools-en.png) |
 
 *Screenshots are from real sessions of a test account on a NeuralDeep model (qwen3.8-27b): every answer, image, test run and network probe above actually happened (`tests/readme-screens.mjs`).*
 
@@ -35,17 +35,19 @@ Paddock does not ship its own agent. It takes a ready-made harness (today Codex 
 
 Most agent cockpits are a desktop app or a terminal on *your* machine, built around one harness and one person. Paddock's bet is the opposite: **the infrastructure is the product.** It runs on any VPS (including where AI APIs are blocked), brings its own proxy chain, keeps every user in a sealed container, and the only way in is a browser with 2FA. No VPN, no laptop that has to stay awake, no remote session that drops, no per-harness deploy just to try a new agent.
 
-| | **Paddock** | Orca | herdr | bb |
+| | **Paddock** | [bb](https://github.com/get-bb/bb) | [Orca](https://github.com/stablyai/orca) | [herdr](https://github.com/herdrdev/herdr) |
 |---|---|---|---|---|
-| Form factor | web UI on your server | desktop app | terminal multiplexer | desktop app |
-| Access from anywhere | any browser, phone included | the machine it is installed on | SSH into the box | the machine it is installed on |
-| Infrastructure included | yes: one `docker compose`, any VPS | no | no | no |
-| Stable egress to AI APIs | proxy chain with failover, health per proxy × API | your own network | your own network | your own network |
-| Isolation | container per user, no direct internet, LAN and host closed, `cap_drop: ALL` | — | — | — |
-| Login protection | password + 2FA (TOTP), per-IP rate limit | — | SSH | — |
-| Several people on one instance | yes, a harness container each | no | no | no |
-| Harnesses | any (Codex today; OpenCode, pi, omp, Hermes next) | its own model of runs/tasks | any terminal agent | — |
-| Strong side | infra, security, reach | orchestration: worktrees, runs, gates | terminal ergonomics, agent statuses | — |
+| Form factor | self-hosted web server | desktop + web app on your machine | desktop app + phone companion | terminal multiplexer |
+| Where agents run | your VPS, a container per user | your machine (+ enrolled machines) | laptop, SSH hosts, Orca server | your machine or SSH hosts |
+| Infrastructure in the box | one `docker compose` on any VPS | — | — | — |
+| Egress to blocked AI APIs | proxy chain with failover, health per proxy × API | not documented | not documented | not documented |
+| Isolation | container per user, no direct internet, LAN/host closed | git worktrees | git worktrees | none (owns PTYs) |
+| Login on a public URL | password + 2FA (TOTP) | tunnel / Tailscale; raw API unauthenticated | pairing token; not for the open internet | OpenSSH |
+| Several people, one instance | yes | one owner | paired clients, no accounts | no |
+| Reach | any browser, phone included | mobile app, phone browser | iOS / Android companion | SSH |
+| Harnesses today | Codex (OpenCode, pi, omp, Hermes, ACP next) | Claude Code, Codex, Pi, OpenCode, Hermes, any ACP agent | 30+ CLI agents | any terminal agent |
+
+They are ahead on breadth (many harnesses, worktrees, agent-to-agent APIs); Paddock is ahead on what you need to run agents for real on a server: the infrastructure, a stable way out, isolation and a login you can put on the internet. Full research with sources, including Conductor, Claude Squad, Vibe Kanban, OpenHands, Coder, Happy, cmux and the vendor clouds: [docs/reference/landscape.md](docs/reference/landscape.md).
 
 What we still borrow from them is in the [roadmap](docs/plans/roadmap.md): agent statuses and agent-to-agent tasks (herdr), queues, worktrees and decision gates (Orca).
 

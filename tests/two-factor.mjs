@@ -1,4 +1,4 @@
-// 2FA end-to-end: включить TOTP в настройках (как Authy — код считаем сами из секрета под QR), выйти,
+// 2FA end-to-end: включить TOTP в настройках (QR сразу, без ввода кода; код как Authy считаем сами из секрета), выйти,
 // войти с кодом, затем выключить обратно. Аккаунт остаётся как был.
 // Запуск: HUB_PASS=… node tests/two-factor.mjs
 import puppeteer from "puppeteer-core";
@@ -43,18 +43,15 @@ try {
   await login();
   await page.waitForFunction(() => document.body.innerText.includes("Лимиты Codex"), { timeout: 20000 });
   await openWebTab();
-  const fa = '.fixed.inset-0 input[placeholder="пароль морды"]';
+  const fa = '.fixed.inset-0 input[placeholder="подтверди паролем от морды"]';
   await page.type(fa, PASS);
-  await clickText(".fixed.inset-0 button", "Включить");
+  await clickText(".fixed.inset-0 button", "Включить 2FA");
   await page.waitForSelector('.fixed.inset-0 img[alt^="QR"]', { timeout: 10000 });
   secret = (await page.$eval(".fixed.inset-0 code", (e) => e.innerText)).replace(/\s/g, "");
   const backup = await page.$$eval(".fixed.inset-0 .grid-cols-2 span", (s) => s.map((x) => x.innerText));
   check("включение: QR, ключ и резервные коды", secret.length >= 16 && backup.length >= 8, `коды: ${backup.length}`);
-  await page.type('.fixed.inset-0 input[autocomplete="one-time-code"]', totp(secret));
-  await clickText(".fixed.inset-0 button", "Подтвердить");
-  await page.waitForFunction(() => /2FA включена/.test(document.querySelector(".fixed.inset-0").innerText), { timeout: 10000 });
   const on = await page.waitForFunction(() => [...document.querySelectorAll(".fixed.inset-0 h3")].some((h) => /Двухфакторный вход\s*включён/.test(h.innerText)), { timeout: 10000 }).then(() => true, () => false);
-  check("подтверждение кодом из приложения: статус «включён»", on);
+  check("включено сразу, без ввода кода в настройках", on && !(await page.$('.fixed.inset-0 input[autocomplete="one-time-code"]')));
   await page.keyboard.press("Escape");
 
   // выход и вход: после пароля просит код

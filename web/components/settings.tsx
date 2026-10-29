@@ -326,7 +326,6 @@ function TwoFactor({ email }: { email: string }) {
   const [override, setOverride] = useState<boolean | null>(null);
   const enabled = override ?? !!(session.data?.user as { twoFactorEnabled?: boolean } | undefined)?.twoFactorEnabled;
   const [pass, setPass] = useState("");
-  const [code, setCode] = useState("");
   const [setup, setSetup] = useState<{ qr: string; secret: string; backup: string[] } | null>(null);
   const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -349,14 +348,8 @@ function TwoFactor({ email }: { email: string }) {
     const secret = new URL(data.totpURI).searchParams.get("secret") ?? "";
     setSetup({ qr: await QRCode.toDataURL(data.totpURI, { margin: 1, width: 200 }), secret, backup: data.backupCodes });
     setPass("");
-  });
-
-  const confirm = () => run(async () => {
-    const { error } = await authClient.twoFactor.verifyTotp({ code: code.replace(/\s+/g, "") });
-    if (error) throw new Error("Код не подошёл — проверь время на телефоне и попробуй следующий");
-    setCode("");
     setOverride(true);
-    setStatus({ ok: true, text: "2FA включена. Сохрани резервные коды — они показываются один раз." });
+    setStatus({ ok: true, text: "2FA включена. Добавь QR в Authy — со следующего входа после пароля спросит код." });
   });
 
   const disable = () => run(async () => {
@@ -374,26 +367,21 @@ function TwoFactor({ email }: { email: string }) {
         Двухфакторный вход
         <span className={`text-xs ${enabled ? "text-[var(--green)]" : "text-[var(--faint)]"}`}>{enabled ? "включён" : "выключен"}</span>
       </h3>
-      <p className="text-sm text-[var(--muted)]">Код из Authy, Google Authenticator или 1Password при каждом входе (или раз в 30 дней на доверенном браузере).</p>
+      <p className="text-sm text-[var(--muted)]">После пароля — код из Authy, Google Authenticator или 1Password. Без галочки «Запомнить браузер» на входе сессия живёт до закрытия браузера, с ней — 30 дней без пароля и кода.</p>
       {!setup && (
         <form onSubmit={(e) => { e.preventDefault(); void (enabled ? disable() : start()); }} className="flex gap-2">
           <input type="text" name="username" autoComplete="username" value={email} readOnly hidden />
-          <input type="password" value={pass} onChange={(e) => setPass(e.target.value)} placeholder="пароль морды" autoComplete="current-password" className={field} />
-          <button disabled={!pass || busy} className={enabled ? secondary : primary}>{busy ? "…" : enabled ? "Выключить" : "Включить"}</button>
+          <input type="password" value={pass} onChange={(e) => setPass(e.target.value)} placeholder="подтверди паролем от морды" autoComplete="current-password" className={field} />
+          <button disabled={!pass || busy} className={`${enabled ? secondary : primary} shrink-0`}>{busy ? "…" : enabled ? "Выключить 2FA" : "Включить 2FA"}</button>
         </form>
       )}
-      {setup && !enabled && (
+      {setup && (
         <div className="space-y-3 rounded-xl bg-[var(--panel-2)] p-3">
-          <p className="text-sm">1. В Authy: «+» → «Scan QR code». Не сканируется — введи ключ вручную.</p>
+          <p className="text-sm">В Authy: «+» → «Scan QR code». Камерой не выходит — введи ключ вручную.</p>
           <div className="flex items-center gap-4">
             <img src={setup.qr} alt="QR для приложения-аутентификатора" className="h-40 w-40 rounded-lg bg-white p-1" />
             <code className="break-all font-mono text-xs text-[var(--muted)]">{setup.secret.replace(/(.{4})/g, "$1 ").trim()}</code>
           </div>
-          <p className="text-sm">2. Введи 6 цифр из приложения:</p>
-          <form onSubmit={(e) => { e.preventDefault(); void confirm(); }} className="flex gap-2">
-            <input value={code} onChange={(e) => setCode(e.target.value)} inputMode="numeric" autoComplete="one-time-code" placeholder="123 456" className={`${field} text-center font-mono tracking-[0.3em]`} />
-            <button disabled={code.replace(/\s+/g, "").length !== 6 || busy} className={primary}>{busy ? "…" : "Подтвердить"}</button>
-          </form>
         </div>
       )}
       {setup && (

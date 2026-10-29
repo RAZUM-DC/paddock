@@ -22,7 +22,8 @@ const options = {
   // до первого не нашего адреса. Без этого лимит попыток входа общий на всех — и перебор, и блокировка всех сразу.
   advanced: { ipAddress: { ipAddressHeaders: ["x-forwarded-for"], trustedProxies: ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] } },
   // 2FA по TOTP (Authy, Google Authenticator, 1Password): включается в Настройки → Вход в морду.
-  plugins: [twoFactor({ issuer: "Paddock" })],
+  // Включается сразу после «Включить»: показали QR, пользователь добавил его в Authy — готово, без ввода кода в настройках.
+  plugins: [twoFactor({ issuer: "Paddock", skipVerificationOnEnable: true })],
 } satisfies BetterAuthOptions;
 
 export const auth = betterAuth(options);

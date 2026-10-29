@@ -1,5 +1,5 @@
 {
-  "name": "codex-hub-web",
+  "name": "paddock-web",
   "private": true,
   "type": "module",
   "scripts": {

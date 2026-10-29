@@ -76,7 +76,7 @@ browser ──HTTPS/WS──▶ edge(nginx) ──▶ web(Next.js, WS-мост) 
 
 | том | что | кто пишет |
 |---|---|---|
-| `codex-home-<user>` | `~/.codex`: сессии, архив, config.toml, вход в ChatGPT, скиллы, инструменты Paddock (`paddock/tools/`) | харнесс, морда через его API |
+| `harness-home-<user>` | `~/.codex`: сессии, архив, config.toml, вход в ChatGPT, скиллы, инструменты Paddock (`paddock/tools/`) | харнесс, морда через его API |
 | `workspace-<user>` | `/workspace`: проекты, картинки (`images/`), вложения (`.paddock/uploads/`) | харнесс |
 | `web-data` | `auth.db`: пользователи и сессии морды | web |
 | `web-builds` | текущая и прошлая сборки морды | супервизор |

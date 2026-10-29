@@ -1,5 +1,5 @@
 // Заводит или обновляет пользователя морды: npm run create-user -- valera@hub.local 'пароль'
-// Часть до @ — имя контейнера codex-<name> и файла токена.
+// Часть до @ — имя контейнера harness-<name> и файла токена.
 import { auth, codexUserOf, ensureDb } from "../lib/auth";
 
 const [email, password] = process.argv.slice(2);

@@ -37,7 +37,7 @@ ssh server 'date +%s > paddock/web/.deploy-request'
 ssh server 'cat paddock/web/.deploy-status'   # building → deployed / build FAILED / rolled back
 ```
 
-То же делает сам Codex админа изнутри: исходники примонтированы ему в `/workspace/codex-hub-web`.
+То же делает сам Codex админа изнутри: исходники примонтированы ему в `/workspace/paddock-web`.
 
 ## Проверка
 

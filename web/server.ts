@@ -1,4 +1,4 @@
-// Next.js + WebSocket-мост: браузер (с сессией) ↔ /ws/codex ↔ codex-<user>:4500 (с capability-токеном).
+// Next.js + WebSocket-мост: браузер (с сессией) ↔ /ws/codex ↔ harness-<user>:4500 (с capability-токеном).
 // Токены пользователей браузер не видит никогда.
 import { createServer, type IncomingHttpHeaders } from "node:http";
 import { readFileSync } from "node:fs";
@@ -9,7 +9,7 @@ import { auth, codexUserOf, ensureDb } from "./lib/auth";
 const dev = process.env.NODE_ENV !== "production";
 const port = Number(process.env.PORT ?? 3000);
 const tokensDir = process.env.TOKENS_DIR ?? "/run/secrets/tokens";
-const codexHost = process.env.CODEX_HOST_TEMPLATE ?? "codex-{user}:4500";
+const codexHost = process.env.CODEX_HOST_TEMPLATE ?? "harness-{user}:4500";
 const publicUrl = process.env.PUBLIC_URL ?? `http://localhost:${port}`;
 
 function toHeaders(h: IncomingHttpHeaders): Headers {
@@ -58,7 +58,7 @@ server.on("upgrade", async (req, socket, head) => {
     );
     upstream.on("open", () => queue.splice(0).forEach(([d, binary]) => upstream.send(d, { binary })));
     upstream.on("unexpected-response", (_req, res) => {
-      console.error(`codex-${user}: upstream rejected with ${res.statusCode}`);
+      console.error(`harness-${user}: upstream rejected with ${res.statusCode}`);
       client.close(1011, "codex unavailable");
     });
     upstream.on("message", (data, isBinary) => client.send(data, { binary: isBinary }));
@@ -69,10 +69,10 @@ server.on("upgrade", async (req, socket, head) => {
     client.on("close", closeBoth);
     upstream.on("close", closeBoth);
     upstream.on("error", (e) => {
-      console.error(`codex-${user}: ${e.message}`);
+      console.error(`harness-${user}: ${e.message}`);
       closeBoth();
     });
   });
 });
 
-server.listen(port, () => console.log(`codex-hub web on :${port} (${dev ? "dev" : "prod"})`));
+server.listen(port, () => console.log(`paddock web on :${port} (${dev ? "dev" : "prod"})`));

@@ -33,7 +33,7 @@ export async function ensureDb() {
   await runMigrations();
 }
 
-// Пользователь «valera@hub.local» работает со своим контейнером codex-valera.
+// Пользователь «valera@hub.local» работает со своим контейнером harness-valera.
 export function codexUserOf(email: string): string {
   const name = email.split("@")[0];
   if (!/^[a-z0-9-]+$/.test(name)) throw new Error(`bad codex user: ${name}`);

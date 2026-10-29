@@ -1,8 +1,8 @@
 #!/bin/bash
-# Добавляет пользователя: свой контейнер codex-<name>, свои тома (история, workspace), свой ws-токен.
-# --admin: ещё и монтирует исходники морды (./web) в /workspace/codex-hub-web, чтобы codex мог её править и выкатывать.
-# После: docker compose up -d codex-<name>, затем вход в ChatGPT из морды: Настройки → Аккаунт ChatGPT → «Получить код»
-# (или по-старому: docker compose exec -it codex-<name> codex login --device-auth)
+# Добавляет пользователя: свой контейнер харнесса harness-<name>, свои тома (история, workspace), свой ws-токен.
+# --admin: ещё и монтирует исходники морды (./web) в /workspace/paddock-web, чтобы агент мог её править и выкатывать.
+# После: docker compose up -d harness-<name>, затем вход в ChatGPT из морды: Настройки → Аккаунт ChatGPT → «Получить код»
+# (или по-старому: docker compose exec -it harness-<name> codex login --device-auth)
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -14,7 +14,7 @@ ADMIN="${2:-}"
 mkdir -p secrets/tokens && chmod 700 secrets
 openssl rand -hex 32 > "secrets/tokens/$U.token"
 chmod 644 "secrets/tokens/$U.token"   # читает uid 1000 внутри контейнера; доступ к каталогу закрыт chmod 700
-if [ "$ADMIN" = "--admin" ]; then mount='      - ./web:/workspace/codex-hub-web'; else mount=''; fi
+if [ "$ADMIN" = "--admin" ]; then mount='      - ./web:/workspace/paddock-web'; else mount=''; fi
 sed -e "s/__USER__/$U/g" -e "s|      # __ADMIN_MOUNT__|$mount|" users/_template.yml | grep -v '^$' > "users/$U.yml"
 
 files="docker-compose.yml"

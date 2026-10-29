@@ -1,9 +1,9 @@
-# codex-hub: egress-прокси, edge (вход снаружи), web (морда) и по одному Codex app-server на пользователя.
-# Изоляция: codex-* живут только во внутренней сети `core` (internal: true) — ни интернета, ни офисной LAN.
+# Paddock: egress-прокси, edge (вход снаружи), web (морда) и по контейнеру харнесса на пользователя (harness-<user>).
+# Изоляция: harness-* живут только во внутренней сети `core` (internal: true) — ни интернета, ни офисной LAN.
 # Наружу они ходят только через `egress` (gost), который пускает трафик исключительно через цепочку внешних прокси.
 # Пользователи описаны в users/<name>.yml (создаёт ./add-user.sh), список файлов — в COMPOSE_FILE из .env.
 
-name: codex-hub
+name: paddock
 
 networks:
   core:

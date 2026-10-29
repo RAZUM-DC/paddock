@@ -31,6 +31,24 @@ Paddock does not ship its own agent. It takes a ready-made harness (today Codex 
 
 *Screenshots are from real sessions of a test account on a NeuralDeep model (qwen3.8-27b): every answer, image, test run and network probe above actually happened (`tests/readme-screens.mjs`).*
 
+## Why Paddock, and how it differs
+
+Most agent cockpits are a desktop app or a terminal on *your* machine, built around one harness and one person. Paddock's bet is the opposite: **the infrastructure is the product.** It runs on any VPS (including where AI APIs are blocked), brings its own proxy chain, keeps every user in a sealed container, and the only way in is a browser with 2FA. No VPN, no laptop that has to stay awake, no remote session that drops, no per-harness deploy just to try a new agent.
+
+| | **Paddock** | Orca | herdr | bb |
+|---|---|---|---|---|
+| Form factor | web UI on your server | desktop app | terminal multiplexer | desktop app |
+| Access from anywhere | any browser, phone included | the machine it is installed on | SSH into the box | the machine it is installed on |
+| Infrastructure included | yes: one `docker compose`, any VPS | no | no | no |
+| Stable egress to AI APIs | proxy chain with failover, health per proxy × API | your own network | your own network | your own network |
+| Isolation | container per user, no direct internet, LAN and host closed, `cap_drop: ALL` | — | — | — |
+| Login protection | password + 2FA (TOTP), per-IP rate limit | — | SSH | — |
+| Several people on one instance | yes, a harness container each | no | no | no |
+| Harnesses | any (Codex today; OpenCode, pi, omp, Hermes next) | its own model of runs/tasks | any terminal agent | — |
+| Strong side | infra, security, reach | orchestration: worktrees, runs, gates | terminal ergonomics, agent statuses | — |
+
+What we still borrow from them is in the [roadmap](docs/plans/roadmap.md): agent statuses and agent-to-agent tasks (herdr), queues, worktrees and decision gates (Orca).
+
 ## How it works
 
 ```mermaid
@@ -43,7 +61,7 @@ flowchart LR
 
 - The browser never sees a harness token; the web bridge checks the session cookie and `Origin` and adds the user's token.
 - Harnesses live in an `internal` Docker network: the only way out is the egress proxy, private networks are refused.
-- All user state is in named volumes (`codex-home-<user>`, `workspace-<user>`), so moving to another server is copy volumes + `docker compose up`.
+- All user state is in named volumes (`harness-home-<user>`, `workspace-<user>`), so moving to another server is copy volumes + `docker compose up`.
 
 Details: [architecture](docs/reference/architecture.md) · [harness protocol](docs/reference/harness-protocol.md) · [roadmap](docs/plans/roadmap.md).
 

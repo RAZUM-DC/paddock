@@ -14,7 +14,7 @@ links:
 
 - Образ `codex/Dockerfile`: node 22 + `@openai/codex`, пользователь `codex` (uid 1000).
 - Запуск: `codex app-server --listen ws://0.0.0.0:4500 --ws-auth capability-token`; токен — `secrets/tokens/<user>.token`.
-- Тома: `codex-home-<user>` (`~/.codex`), `workspace-<user>` (`/workspace`). Админу ещё монтируются исходники морды — Codex может её править и выкатывать.
+- Тома: `harness-home-<user>` (`~/.codex`), `workspace-<user>` (`/workspace`). Админу ещё монтируются исходники морды — Codex может её править и выкатывать.
 - Сеть: только `core` (internal). Интернет — через `HTTPS_PROXY=http://egress:8080`.
 - `codex/config.toml`: `sandbox_mode = "danger-full-access"` (песочница — сам контейнер), `approval_policy = "on-request"`. Меняется из морды.
 - Сессии Codex хранит бессрочно; см. roadmap 3.6.

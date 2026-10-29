@@ -1,0 +1,102 @@
+# Example secrets/egress/gost.yaml: direct outbound, no upstream proxy chain. gost v3 (image gogost/gost:3.3.2).
+#
+# STATUS: to verify. The syntax was checked against the gost v3 docs (gost.run: concepts/bypass, concepts/admission,
+# tutorials/api/overview) and the go-gost/x source (config.ServiceConfig, handler/http, bypass matchers), but this
+# file was NOT run against a gost binary when it was written. Before relying on it:
+#   docker compose up -d egress && docker compose logs egress          # must start without config errors
+#   docker compose exec web sh -c 'curl -sx http://egress:8080 -o /dev/null -w "%{http_code}\n" https://example.com'   # 200
+#   docker compose exec web sh -c 'curl -sx http://egress:8080 -o /dev/null -w "%{http_code}\n" http://10.0.0.1/'      # 403
+#   docker compose exec web sh -c 'curl -sx http://egress:8080 -o /dev/null -w "%{http_code}\n" http://harness-x:4500/' # 403
+#
+# With a chain of upstream proxies instead (the default Paddock setup), add `chain: upstream` to the handler and a
+# `chains:` section; the web UI's Settings → Proxies tab edits that chain. Without a chain that tab has nothing to edit.
+
+services:
+  - name: proxy
+    addr: ":8080"
+    # Who may use the proxy (client addresses): only containers on Docker's private networks. Defence in depth in
+    # case the port is ever published; harnesses and web connect from 172.16/12 (or 10/8, 192.168/16) addresses.
+    admission: clients-private-only
+    # Where requests may go (target addresses): refused with 403 when they match.
+    bypass: no-private-targets
+    handler:
+      type: http
+      # no `chain:` → gost dials the target directly
+    listener:
+      type: tcp
+
+admissions:
+  - name: clients-private-only
+    whitelist: true
+    matchers:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+
+bypasses:
+  - name: no-private-targets
+    # Blacklist mode (the default): a target that matches is refused.
+    matchers:
+      # Private, link-local (cloud metadata 169.254.169.254), CGNAT, loopback and "this" networks.
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 169.254.0.0/16
+      - 100.64.0.0/10
+      - 127.0.0.0/8
+      - 0.0.0.0/8
+      - ::1/128
+      - fc00::/7
+      - fe80::/10
+      # The bypass is matched against the target as requested, BEFORE DNS: the CIDRs above only stop literal IPs.
+      # Names that Docker's DNS resolves to the containers next to egress must be refused by name.
+      - localhost
+      - "*.localhost"
+      - "*.local"
+      - "*.internal"
+      - "harness-*"
+      - "paddock-*"
+      - web
+      - egress
+      - edge
+      - provisioner
+      # Remaining gap: a public name that resolves to a private address (DNS rebinding) passes this check.
+      # The services behind those addresses must still authenticate (harnesses do: capability token).
+
+# Web API for the web UI (Settings → Proxies, network checks); web reads the password from secrets/web.env
+# (GOST_API_USER / GOST_API_PASS). This global `api` block listens on every network egress is on, so every harness can
+# reach it and only the password protects it.
+api:
+  addr: ":18080"
+  pathPrefix: /api
+  accesslog: false
+  auth:
+    username: hub
+    password: CHANGE_ME_TO_A_LONG_RANDOM_PASSWORD
+
+# Hardened variant for docker-compose.provisioner.yml (also to verify): drop the `api:` block above and run the API as a
+# service that admits only the `control` network (PADDOCK_CONTROL_SUBNET, default 172.31.255.0/28), where web reaches
+# it as egress-api:18080. Harnesses connect from their own networks and are refused before the password is checked.
+#
+# services:
+#   - name: api
+#     addr: ":18080"
+#     admission: control-only
+#     handler:
+#       type: api
+#       auth:
+#         username: hub
+#         password: CHANGE_ME_TO_A_LONG_RANDOM_PASSWORD
+#       metadata:
+#         pathPrefix: /api
+#     listener:
+#       type: tcp
+# admissions:
+#   - name: control-only
+#     whitelist: true
+#     matchers:
+#       - 172.31.255.0/28
+
+log:
+  level: info

@@ -16,3 +16,7 @@ links:
 - Blocks LAN and host access, so a harness cannot reach neighboring machines.
 - gost API `:18080` with basic auth: the web UI edits the proxy list on the fly and saves it back to `gost.yaml` (`POST /api/config`). The API password is in `secrets/web.env`.
 - Checking the way out: Settings → Proxy → "Check egress" (ipinfo.io through the chain).
+- [gost.example.yaml](gost.example.yaml): a starting point with direct outbound (no upstream chain), private targets
+  refused (10/8, 172.16/12, 192.168/16, 169.254/16, 100.64/10, 127/8 and internal container names), clients admitted
+  only from private networks, and the API with a password placeholder. Marked "to verify": run the checks listed at
+  its top before relying on it.

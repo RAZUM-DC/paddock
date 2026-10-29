@@ -55,3 +55,43 @@ export function isAdmin(u: { harnessId: string; email: string; adminUsers: strin
   const email = u.email.toLowerCase();
   return u.adminUsers.some((a) => a !== "" && (a === u.harnessId || a.toLowerCase() === email));
 }
+
+// --- OIDC ---
+
+// Claims of a JWT without checking the signature: only for an id_token that better-auth has already verified
+// against the issuer's JWKS (requireIdTokenVerification), or to read claims we then re-check against userinfo.
+export function decodeJwtClaims(jwt: string | undefined | null): Record<string, unknown> {
+  const part = jwt?.split(".")[1];
+  if (!part) return {};
+  try {
+    const v = JSON.parse(Buffer.from(part, "base64url").toString("utf8"));
+    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  } catch {
+    return {};
+  }
+}
+
+export type OidcPolicy = { allowedGroups: string[]; adminGroups: string[]; groupsClaim: string };
+export type OidcDecision =
+  | { ok: true; sub: string; email: string; emailVerified: boolean; name: string; image?: string; groups: string[]; admin: boolean; profile: Record<string, unknown> }
+  | { ok: false; reason: "no_subject" | "subject_mismatch" | "no_email" | "not_allowed"; sub?: string };
+
+// One login: id_token claims + userinfo (userinfo wins, it is fresher and often the only place with groups),
+// then the group policy. OIDC Core 5.3.2: a userinfo answer for another subject must be ignored — we refuse.
+export function decideOidcLogin(idClaims: Record<string, unknown>, userinfo: Record<string, unknown> | null, policy: OidcPolicy): OidcDecision {
+  const str = (v: unknown) => (typeof v === "string" || typeof v === "number" ? String(v) : "");
+  const idSub = str(idClaims.sub);
+  const uiSub = userinfo ? str(userinfo.sub) : "";
+  if (idSub && uiSub && idSub !== uiSub) return { ok: false, reason: "subject_mismatch", sub: idSub };
+  const profile = { ...idClaims, ...(userinfo ?? {}) };
+  const sub = idSub || uiSub;
+  if (!sub) return { ok: false, reason: "no_subject" };
+  const groups = groupsOf(profile, policy.groupsClaim);
+  const { allowed, admin } = checkGroups(groups, policy.allowedGroups, policy.adminGroups);
+  if (!allowed) return { ok: false, reason: "not_allowed", sub };
+  const email = str(profile.email).toLowerCase();
+  if (!email) return { ok: false, reason: "no_email", sub };
+  const name = str(profile.name) || str(profile.preferred_username) || email.split("@")[0];
+  const image = str(profile.picture) || undefined;
+  return { ok: true, sub, email, emailVerified: profile.email_verified === true || profile.email_verified === "true", name, image, groups, admin, profile };
+}

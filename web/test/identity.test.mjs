@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { checkGroups, chooseHarnessId, deriveHarnessId, discoveryUrl, groupsOf, isAdmin, isValidHarnessId, legacyHarnessId, parseList } from "../lib/identity.ts";
+import { checkGroups, chooseHarnessId, decideOidcLogin, decodeJwtClaims, deriveHarnessId, discoveryUrl, groupsOf, isAdmin, isValidHarnessId, legacyHarnessId, parseList } from "../lib/identity.ts";
 
 test("deriveHarnessId: u- + first 12 hex of sha256(salt:issuer:sub)", () => {
   const want = "u-" + createHash("sha256").update("s3:https://idp.example/o:abc").digest("hex").slice(0, 12);
@@ -88,4 +88,52 @@ test("parseList and discoveryUrl", () => {
   assert.deepEqual(parseList(" a, b ,,c d "), ["a", "b", "c", "d"]);
   assert.deepEqual(parseList(undefined), []);
   assert.equal(discoveryUrl("https://idp.example/o/"), "https://idp.example/o/.well-known/openid-configuration");
+});
+
+const jwt = (claims) => ["e30", Buffer.from(JSON.stringify(claims)).toString("base64url"), "sig"].join(".");
+const policy = { allowedGroups: [], adminGroups: [], groupsClaim: "groups" };
+
+test("decodeJwtClaims: payload of a JWT, {} for garbage", () => {
+  assert.deepEqual(decodeJwtClaims(jwt({ sub: "1", groups: ["a"] })), { sub: "1", groups: ["a"] });
+  assert.deepEqual(decodeJwtClaims("x"), {});
+  assert.deepEqual(decodeJwtClaims("a.!!!.c"), {});
+  assert.deepEqual(decodeJwtClaims(jwt([1, 2])), {});
+  assert.deepEqual(decodeJwtClaims(undefined), {});
+});
+
+test("decideOidcLogin: merges id_token and userinfo, userinfo wins", () => {
+  const d = decideOidcLogin({ sub: "1", email: "Old@Corp", name: "Old" }, { sub: "1", email: "First.Last@Corp", email_verified: true, groups: ["dev"] }, policy);
+  assert.equal(d.ok, true);
+  assert.equal(d.email, "first.last@corp");
+  assert.equal(d.emailVerified, true);
+  assert.equal(d.name, "Old");
+  assert.deepEqual(d.groups, ["dev"]);
+});
+
+test("decideOidcLogin: userinfo for another subject is refused", () => {
+  assert.deepEqual(decideOidcLogin({ sub: "1", email: "a@b" }, { sub: "2", email: "a@b" }, policy), { ok: false, reason: "subject_mismatch", sub: "1" });
+});
+
+test("decideOidcLogin: no subject, no email", () => {
+  assert.equal(decideOidcLogin({ email: "a@b" }, null, policy).reason, "no_subject");
+  assert.equal(decideOidcLogin({ sub: "1" }, null, policy).reason, "no_email");
+  assert.equal(decideOidcLogin({}, { sub: "7", email: "a@b" }, policy).ok, true);
+});
+
+test("decideOidcLogin: group policy and admin groups at every login", () => {
+  const p = { allowedGroups: ["paddock"], adminGroups: ["paddock-admins"], groupsClaim: "groups" };
+  assert.deepEqual(decideOidcLogin({ sub: "1", email: "a@b", groups: ["other"] }, null, p), { ok: false, reason: "not_allowed", sub: "1" });
+  const user = decideOidcLogin({ sub: "1", email: "a@b", groups: ["paddock"] }, null, p);
+  assert.equal(user.ok && user.admin, false);
+  const admin = decideOidcLogin({ sub: "1", email: "a@b", groups: ["paddock", "paddock-admins"] }, null, p);
+  assert.equal(admin.ok && admin.admin, true);
+  // Admin group alone is not an allowed group.
+  assert.equal(decideOidcLogin({ sub: "1", email: "a@b", groups: ["paddock-admins"] }, null, p).ok, false);
+});
+
+test("decideOidcLogin: email_verified must be true, name falls back", () => {
+  const d = decideOidcLogin({ sub: "1", email: "a@b", email_verified: "false", preferred_username: "al" }, null, policy);
+  assert.equal(d.emailVerified, false);
+  assert.equal(d.name, "al");
+  assert.equal(decideOidcLogin({ sub: "1", email: "zed@b" }, null, policy).name, "zed");
 });

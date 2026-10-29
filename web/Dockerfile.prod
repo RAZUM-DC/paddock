@@ -1,0 +1,31 @@
+# Production image: the web UI is built into the image, no supervisor and no self-deploy (SELF_DEPLOY=0).
+# The default Dockerfile instead builds /src at runtime so an admin's agent can edit and redeploy the UI.
+#   docker build -f web/Dockerfile.prod -t paddock-web web
+# Compose: `build: { context: ./web, dockerfile: Dockerfile.prod }` and drop the ./web:/src and web-builds mounts.
+FROM node:22-bookworm-slim AS build
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 make g++ ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --include=dev --no-audit --no-fund
+COPY . .
+# next build reads lib/auth.ts, which opens the database: give it a throwaway one.
+RUN AUTH_DB=/tmp/build-auth.db BETTER_AUTH_SECRET=build-only-not-a-secret npx next build \
+ && rm -f /tmp/build-auth.db* \
+ && npm prune --omit=dev --no-audit --no-fund \
+ && rm -rf .next/cache test supervisor.sh Dockerfile Dockerfile.prod
+
+FROM node:22-bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && mkdir -p /data \
+ && chown node:node /data
+WORKDIR /app
+COPY --from=build --chown=node:node /app /app
+USER node
+ENV NODE_ENV=production PORT=3000 AUTH_DB=/data/auth.db TOKENS_DIR=/run/secrets/tokens SELF_DEPLOY=0
+EXPOSE 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s CMD curl -fs -o /dev/null http://127.0.0.1:3000/login || exit 1
+CMD ["node_modules/.bin/tsx", "server.ts"]

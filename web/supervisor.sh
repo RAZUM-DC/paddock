@@ -1,6 +1,7 @@
 #!/bin/bash
 # Супервизор морды: собирает /src в отдельную папку, переключает только рабочую сборку, при провале откатывает.
 # Codex просит выкатку записью в /src/.deploy-request; результат пишется в /src/.deploy-status.
+# SELF_DEPLOY=0: build once at start (or keep the existing build), never rebuild on request — the UI cannot redeploy itself.
 set -uo pipefail
 
 SRC=/src
@@ -74,7 +75,10 @@ last=$(cat "$REQ" 2>/dev/null || true)
 while true; do
   sleep 5
   req=$(cat "$REQ" 2>/dev/null || true)
-  if [ "$req" != "$last" ]; then
+  if [ "$req" != "$last" ] && [ "${SELF_DEPLOY:-1}" = "0" ]; then
+    last=$req
+    status "deploy request ignored: SELF_DEPLOY=0"
+  elif [ "$req" != "$last" ]; then
     last=$req
     build
   elif [ -e "$CURRENT" ] && ! kill -0 "$PID" 2>/dev/null; then

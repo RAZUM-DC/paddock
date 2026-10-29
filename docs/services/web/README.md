@@ -22,6 +22,7 @@ links:
 | `web/lib/proxy.ts` | gost API (admin only), outbound requests through egress |
 | `web/tools/` | registry of Paddock tools (CLI + skill); the web UI installs them into the harness, see `web/tools/README.md` |
 | `web/lib/turn-meta.ts` | `turn_meta` table in `/data/auth.db`: model, TTFT, tok/s, last usage of a turn |
-| `web/supervisor.sh` | builds next to the old version, switches only when `/login` is alive, rolls back |
+| `web/supervisor.sh` | builds next to the old version, switches only when `/login` is alive, rolls back; `SELF_DEPLOY=0` = build once, ignore deploy requests |
+| `web/Dockerfile.prod` | alternative image: built at image build time, no supervisor, no self-deploy |
 
 The admin is set by `ADMIN_USERS` in `secrets/web.env`. Deploy: [ops/deploy.md](../../ops/deploy.md).

@@ -39,6 +39,16 @@ ssh server 'cat paddock/web/.deploy-status'   # building → deployed / build FA
 
 The admin's own Codex does the same from inside: the UI sources are mounted for it at `/workspace/paddock-web`.
 
+## Without self-deploy (image build)
+
+`web/Dockerfile.prod` builds the Next app when the image is built and runs `tsx server.ts` directly: no supervisor,
+no `/src` mount, no `.deploy-request`. Use it when the UI must not change itself (and nobody's agent gets the UI
+sources): in compose, `build: { context: ./web, dockerfile: Dockerfile.prod }` and remove the `./web:/src` and
+`web-builds` mounts from `web`; do not use `add-user.sh --admin`.
+
+With the default image, `SELF_DEPLOY=0` in `secrets/web.env` makes the supervisor build once at start and ignore
+later deploy requests (the status file says so). New versions then need a container restart.
+
 ## Checks
 
 ```bash

@@ -1,0 +1,9 @@
+# Контейнер сам является песочницей (нет root, нет сети кроме egress, нет docker-сокета),
+# поэтому внутренний sandbox codex не дублируем: в docker без привилегий он всё равно не поднимается.
+sandbox_mode = "danger-full-access"
+approval_policy = "on-request"
+
+[shell_environment_policy]
+inherit = "core"
+# "core" не пропускает прокси — без них shell-команды агента (npm, git, curl) упираются в изоляцию сети.
+set = { HTTPS_PROXY = "http://egress:8080", HTTP_PROXY = "http://egress:8080", NO_PROXY = "localhost,127.0.0.1" }

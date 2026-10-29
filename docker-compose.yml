@@ -1,0 +1,67 @@
+# codex-hub: egress-прокси, edge (вход снаружи), web (морда) и по одному Codex app-server на пользователя.
+# Изоляция: codex-* живут только во внутренней сети `core` (internal: true) — ни интернета, ни офисной LAN.
+# Наружу они ходят только через `egress` (gost), который пускает трафик исключительно через цепочку внешних прокси.
+# Пользователи описаны в users/<name>.yml (создаёт ./add-user.sh), список файлов — в COMPOSE_FILE из .env.
+
+name: codex-hub
+
+networks:
+  core:
+    internal: true
+  outside: {}
+
+services:
+  egress:
+    image: gogost/gost:3.3.2
+    command: ["-C", "/etc/gost/gost.yaml"]
+    # Каталог, а не файл, и на запись: морда меняет цепочку через API gost (:18080, только сеть core, с паролем),
+    # gost сохраняет её обратно в gost.yaml.
+    volumes:
+      - ./secrets/egress:/etc/gost
+    networks: [core, outside]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    cpus: 0.5
+
+  web:
+    build: ./web
+    depends_on: [egress]
+    env_file: ./secrets/web.env
+    environment:
+      HTTPS_PROXY: http://egress:8080
+      HTTP_PROXY: http://egress:8080
+      NO_PROXY: localhost,127.0.0.1,web,egress
+      npm_config_proxy: http://egress:8080
+      npm_config_https_proxy: http://egress:8080
+    volumes:
+      - ./web:/src
+      - web-builds:/build
+      - web-data:/data
+      - web-npm:/home/node/.npm
+      - ./secrets/tokens:/run/secrets/tokens:ro
+    networks: [core]
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 3g
+    cpus: 2
+
+  edge:
+    image: nginx:1.27-alpine
+    depends_on: [web]
+    ports:
+      - "${EDGE_BIND:-0.0.0.0}:8088:8088"
+    volumes:
+      - ./edge/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    networks: [core, outside]
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.5
+
+volumes:
+  web-builds: {}
+  web-data: {}
+  web-npm: {}

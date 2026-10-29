@@ -1,0 +1,163 @@
+// Перевод тредов и событий Codex в сообщения для assistant-ui.
+// Один ход Codex = сообщение пользователя + одно сообщение ассистента со всеми частями хода.
+import type { ThreadMessageLike } from "@assistant-ui/react";
+
+export type ToolKind = "shell" | "read" | "search" | "list" | "patch" | "mcp" | "web" | "tool";
+export type WebLink = { title: string; url: string | null; domain: string | null; snippet: string | null };
+export type FileEdit = { path: string; kind: "add" | "delete" | "update"; diff: string };
+export type ToolArgs = { kind: ToolKind; title: string; durationMs: number | null; diff: boolean; verb?: string; links?: WebLink[]; files?: FileEdit[] };
+
+export type Part =
+  | { type: "text"; itemId: string; text: string }
+  | { type: "reasoning"; itemId: string; text: string }
+  | { type: "tool-call"; itemId: string; toolName: string; argsText: string; args: ToolArgs; result?: string; isError?: boolean };
+
+// Что известно о ходе: какой моделью отвечали, сколько шёл. Модель в истории Codex не хранится,
+// поэтому её запоминаем сами (localStorage), а для старых ходов берём модель треда.
+// outTokens — сумма выходных токенов всех вызовов модели за ход, ttftMs — время до первого токена, usage — последний расход (контекст, кеш): Codex его при открытии чата не отдаёт (для скорости под ответом).
+export type TurnMeta = { model?: string | null; effort?: string | null; durationMs?: number | null; startedAt?: number; outTokens?: number; ttftMs?: number; usage?: unknown };
+
+export type Msg = { id: string; role: "user" | "assistant"; turnId: string; parts: Part[]; running?: boolean; meta?: TurnMeta };
+
+const tool = (item: any, kind: ToolKind, title: string, extra: Partial<Part & { type: "tool-call" }> = {}): Part => ({
+  type: "tool-call",
+  itemId: item.id,
+  toolName: kind,
+  argsText: title,
+  args: { kind, title, durationMs: item.durationMs ?? null, diff: kind === "patch" },
+  ...extra,
+});
+
+// "/bin/bash -lc 'ls -la'" → "ls -la"
+function bareCommand(cmd: string): string {
+  const m = cmd.match(/^(?:\S*\/)?(?:ba|z)?sh\s+-l?c\s+(['"])([\s\S]*)\1$/);
+  return m ? m[2] : cmd;
+}
+
+function commandPart(item: any): Part {
+  const actions: any[] = item.commandActions ?? [];
+  const cmd = bareCommand(item.command ?? "");
+  const exit = item.exitCode == null ? "" : `\n[exit ${item.exitCode}]`;
+  const result = item.aggregatedOutput == null ? (item.exitCode == null ? undefined : exit.trim()) : item.aggregatedOutput + exit;
+  const extra = { result, isError: item.exitCode != null && item.exitCode !== 0, argsText: cmd };
+  const only = (t: string) => actions.length > 0 && actions.every((a) => a.type === t);
+  if (only("read")) return tool(item, "read", actions.map((a) => a.name ?? a.path).join(", "), extra);
+  if (only("search")) return tool(item, "search", actions.map((a) => [a.query, a.path && `в ${a.path}`].filter(Boolean).join(" ")).join(", "), extra);
+  if (only("listFiles")) return tool(item, "list", actions.map((a) => a.path ?? ".").join(", "), extra);
+  return tool(item, "shell", cmd.split("\n")[0], extra);
+}
+
+function mcpText(result: any): string | undefined {
+  if (result == null) return undefined;
+  const texts = (result.content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text);
+  return texts.length ? texts.join("\n") : JSON.stringify(result, null, 2);
+}
+
+export function itemToPart(item: any): Part | null {
+  switch (item.type) {
+    case "agentMessage":
+      return { type: "text", itemId: item.id, text: item.text ?? "" };
+    case "plan":
+      return { type: "text", itemId: item.id, text: item.text ?? "" };
+    case "reasoning":
+      return { type: "reasoning", itemId: item.id, text: (item.summary ?? []).join("\n\n") };
+    case "contextCompaction":
+      return { type: "reasoning", itemId: item.id, text: "Контекст сжат" };
+    case "commandExecution":
+      return commandPart(item);
+    case "fileChange": {
+      const changes: any[] = item.changes ?? [];
+      const verb = (k: any) => ({ add: "+", delete: "−", update: "~" })[(k?.type ?? k) as string] ?? "~";
+      const p = tool(item, "patch", changes.map((c) => `${verb(c.kind)} ${c.path}`).join(", "), {
+        argsText: changes.map((c) => c.path).join("\n"),
+        result: item.status === "inProgress" ? undefined : changes.map((c) => c.diff).join("\n"),
+        isError: item.status === "failed" || item.status === "declined",
+      });
+      if (p.type === "tool-call" && item.status !== "failed" && item.status !== "declined")
+        p.args = { ...p.args, files: changes.map((c) => ({ path: c.path, kind: c.kind?.type ?? c.kind ?? "update", diff: c.diff ?? "" })) };
+      return p;
+    }
+    case "mcpToolCall":
+      return tool(item, "mcp", `${item.server}.${item.tool}`, {
+        argsText: JSON.stringify(item.arguments ?? {}, null, 2),
+        result: item.error ? item.error.message : mcpText(item.result),
+        isError: !!item.error,
+      });
+    case "dynamicToolCall":
+      return tool(item, "tool", item.tool, {
+        argsText: JSON.stringify(item.arguments ?? {}, null, 2),
+        result: item.contentItems == null ? undefined : JSON.stringify(item.contentItems, null, 2),
+        isError: item.success === false,
+      });
+    case "webSearch": {
+      const a = item.action ?? {};
+      const verb = a.type === "openPage" ? "Open" : a.type === "findInPage" ? "Find" : "Search";
+      const title = a.type === "openPage" ? a.url : a.type === "findInPage" ? `${a.pattern ?? ""} в ${a.url ?? ""}` : a.query ?? a.queries?.join(", ") ?? item.query;
+      const links: WebLink[] = (item.results ?? []).map((r: any) => ({ title: r.title ?? r.url ?? "", url: r.url ?? null, domain: r.domain ?? null, snippet: r.snippet ?? null }));
+      const p = tool(item, "web", title ?? item.query ?? "", { result: item.results == null ? undefined : `${links.length}` });
+      if (p.type === "tool-call") p.args = { ...p.args, verb, links };
+      return p;
+    }
+    default:
+      return null;
+  }
+}
+
+export function userText(item: any): string {
+  return (item.content ?? []).filter((c: any) => c.type === "text").map((c: any) => c.text).join("\n");
+}
+
+export function turnsToMessages(turns: any[], meta: (turnId: string) => TurnMeta): Msg[] {
+  const out: Msg[] = [];
+  for (const turn of turns) {
+    const parts: Part[] = [];
+    for (const item of turn.items ?? []) {
+      if (item.type === "userMessage") {
+        out.push({ id: `u-${turn.id}`, role: "user", turnId: turn.id, parts: [{ type: "text", itemId: item.id, text: userText(item) }] });
+      } else {
+        const p = itemToPart(item);
+        if (p) parts.push(p);
+      }
+    }
+    if (turn.error) parts.push({ type: "text", itemId: `err-${turn.id}`, text: `⚠️ ${turn.error.message ?? "ошибка хода"}` });
+    const running = turn.status === "inProgress";
+    out.push({
+      id: `a-${turn.id}`,
+      role: "assistant",
+      turnId: turn.id,
+      parts,
+      running,
+      meta: { ...meta(turn.id), durationMs: turn.durationMs, startedAt: turn.startedAt ? turn.startedAt * 1000 : undefined },
+    });
+  }
+  return out;
+}
+
+export function toThreadMessage(m: Msg): ThreadMessageLike {
+  return {
+    id: m.id,
+    role: m.role,
+    status: m.role === "assistant" ? (m.running ? { type: "running" } : { type: "complete", reason: "stop" }) : undefined,
+    metadata: { custom: { ...m.meta, turnId: m.turnId } },
+    content: m.parts.map((p) =>
+      p.type === "tool-call"
+        ? { type: "tool-call", toolCallId: p.itemId, toolName: p.toolName, argsText: p.argsText, args: p.args, result: p.result, isError: p.isError }
+        : { type: p.type, text: p.text },
+    ),
+  };
+}
+
+// Все файлы, которые Codex трогал в треде (через apply_patch), в порядке последнего изменения.
+export type ChangedFile = FileEdit & { edits: number; turnId: string };
+export function changedFiles(messages: Msg[]): ChangedFile[] {
+  const byPath = new Map<string, ChangedFile>();
+  for (const m of messages)
+    for (const p of m.parts)
+      if (p.type === "tool-call")
+        for (const f of p.args.files ?? []) {
+          const prev = byPath.get(f.path);
+          byPath.delete(f.path);
+          byPath.set(f.path, { ...f, kind: prev?.kind === "add" && f.kind === "update" ? "add" : f.kind, edits: (prev?.edits ?? 0) + 1, turnId: m.turnId });
+        }
+  return [...byPath.values()].reverse();
+}

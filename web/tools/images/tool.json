@@ -1,0 +1,8 @@
+{
+  "id": "images",
+  "name": "Картинки",
+  "description": "Генерация и правка картинок через NeuralDeep (Qwen-Image). Картинки ложатся в images/ папки чата и видны миниатюрами.",
+  "bin": "paddock-images.mjs",
+  "skill": "paddock-images",
+  "needs": "neuraldeep"
+}

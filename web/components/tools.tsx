@@ -1,0 +1,207 @@
+// Вкладка «Инструменты»: CLI-инструменты Paddock (реестр web/tools/) и все скиллы харнесса с вкл/выкл.
+// Плюс поповер «что доступно в этой сессии» для статус-бара окна чата.
+import { useEffect, useMemo, useState } from "react";
+import { installTool, listSkills, loadRegistry, removeTool, setSkillEnabled, toolBin, toolState, type Skill, type Tool, type ToolState } from "@/lib/tools";
+import { Icon } from "./icons";
+
+type Request = (method: string, params: unknown) => Promise<any>;
+
+const field = "w-full rounded-lg border border-[var(--border)] bg-[var(--bg)] px-3 py-2 text-sm outline-none focus:border-[var(--accent)]/50";
+const primary = "rounded-lg bg-gradient-to-r from-[var(--accent)] to-[var(--accent-2)] px-3 py-1.5 text-sm font-medium text-black disabled:opacity-40";
+const scopeLabel: Record<string, string> = { user: "свой", repo: "проект", system: "системный", admin: "админ" };
+
+export function ToolsTab({ request }: { request: Request }) {
+  const [tools, setTools] = useState<Tool[] | null>(null);
+  const [skills, setSkills] = useState<Skill[] | null>(null);
+  const [error, setError] = useState("");
+
+  const reloadSkills = (force = false) => listSkills(request, "/workspace", force).then(setSkills).catch((e) => setError(e.message));
+  useEffect(() => {
+    loadRegistry().then(setTools).catch((e) => setError(e.message));
+    reloadSkills();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [request]);
+
+  const paddockSkills = new Set(tools?.map((t) => t.skill));
+  return (
+    <div className="space-y-6">
+      <p className="text-sm text-[var(--muted)]">
+        Инструмент Paddock — это команда и скилл, который объясняет агенту, когда её звать. Shell есть у любого харнесса и любой модели, поэтому инструменты не зависят ни от Codex, ни от провайдера.
+      </p>
+      {error && <p className="text-sm text-[var(--red)]">{error}</p>}
+
+      <section className="space-y-2">
+        <h3 className="text-xs font-medium uppercase tracking-wide text-[var(--faint)]">Инструменты Paddock</h3>
+        {!tools && !error && <p className="text-sm text-[var(--faint)]">читаю реестр…</p>}
+        {tools?.map((t) => <ToolCard key={t.id} tool={t} request={request} onChange={() => reloadSkills(true)} />)}
+      </section>
+
+      <section className="space-y-2">
+        <div className="flex items-center gap-2">
+          <h3 className="flex-1 text-xs font-medium uppercase tracking-wide text-[var(--faint)]">Скиллы в харнессе</h3>
+          <button onClick={() => reloadSkills(true)} className="rounded-md p-1 text-[var(--muted)] hover:bg-[var(--panel-2)]" title="Перечитать с диска">
+            <Icon name="refresh" size={13} />
+          </button>
+        </div>
+        {!skills && !error && <p className="text-sm text-[var(--faint)]">читаю скиллы…</p>}
+        {skills && skills.length === 0 && <p className="text-sm text-[var(--faint)]">скиллов нет</p>}
+        <div className="divide-y divide-[var(--border)] rounded-xl border border-[var(--border)]">
+          {skills?.map((s) => (
+            <label key={s.path} className="flex items-start gap-3 px-3 py-2 text-sm">
+              <input type="checkbox" checked={s.enabled} className="mt-0.5 h-4 w-4 accent-[var(--accent)]"
+                onChange={(e) => setSkillEnabled(request, s, e.target.checked).then(() => reloadSkills(true)).catch((err) => setError(err.message))} />
+              <span className="min-w-0 flex-1">
+                <span className="font-mono text-[13px]">{s.name}</span>
+                <span className="ml-2 text-[11px] text-[var(--faint)]">{scopeLabel[s.scope] ?? s.scope}{paddockSkills.has(s.name) ? " · Paddock" : ""}</span>
+                <span className="block truncate text-xs text-[var(--muted)]" title={s.description}>{s.description}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+        <p className="text-xs text-[var(--faint)]">Скиллы проекта (папка <span className="font-mono">.codex/skills</span> в репо) видны в окне чата этого проекта, значок под полем ввода.</p>
+      </section>
+    </div>
+  );
+}
+
+function ToolCard({ tool, request, onChange }: { tool: Tool; request: Request; onChange: () => void }) {
+  const [st, setSt] = useState<ToolState | null>(null);
+  const [enabled, setEnabled] = useState(false);
+  const [settings, setSettings] = useState<Record<string, any>>({});
+  const [needKey, setNeedKey] = useState(false);
+  const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    toolState(request, tool).then((s) => {
+      setSt(s);
+      setEnabled(s.installed);
+      setSettings(s.settings);
+    });
+    if (tool.needs === "neuraldeep")
+      request("config/read", {}).then((r) => setNeedKey(!r.config?.model_providers?.neuraldeep?.experimental_bearer_token)).catch(() => {});
+  }, [request, tool]);
+
+  if (!st) return <div className="rounded-xl bg-[var(--panel-2)] p-3 text-sm text-[var(--faint)]">{tool.name}…</div>;
+  const dirty = enabled !== st.installed || (enabled && (st.outdated || JSON.stringify(settings) !== JSON.stringify(st.settings)));
+  const set = (patch: Record<string, unknown>) => { setSettings({ ...settings, ...patch }); setStatus(null); };
+
+  const apply = async () => {
+    setBusy(true);
+    setStatus(null);
+    try {
+      if (enabled) {
+        if (needKey) throw new Error("сначала подключи ключ во вкладке NeuralDeep");
+        await installTool(request, tool, settings);
+        if (tool.id === "images") await cleanupLegacyImages(request);
+      } else await removeTool(request, tool);
+      setSt({ installed: enabled, outdated: false, settings });
+      setStatus({ ok: true, text: enabled ? "Готово, действует для новых ходов" : "Выключено" });
+      onChange();
+    } catch (e) {
+      setStatus({ ok: false, text: e instanceof Error ? e.message : "не получилось" });
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div className="space-y-3 rounded-xl bg-[var(--panel-2)] p-3">
+      <label className="flex items-start gap-3 text-sm">
+        <input type="checkbox" checked={enabled} onChange={(e) => { setEnabled(e.target.checked); setStatus(null); }} className="mt-0.5 h-4 w-4 accent-[var(--accent)]" />
+        <span className="min-w-0 flex-1">
+          <span className="font-medium">{tool.name}</span>
+          <span className="ml-2 font-mono text-[11px] text-[var(--faint)]">{tool.skill}</span>
+          <span className="block text-xs text-[var(--muted)]">{tool.description}</span>
+        </span>
+        <span className={`text-xs ${st.installed ? (st.outdated ? "text-[var(--yellow)]" : "text-[var(--green)]") : "text-[var(--faint)]"}`}>
+          {st.installed ? (st.outdated ? "есть обновление" : "установлен") : "выключен"}
+        </span>
+      </label>
+      {needKey && <p className="text-xs text-[var(--red)]">ключ NeuralDeep не подключён — вкладка NeuralDeep</p>}
+      {tool.id === "images" && (
+        <div className={`grid gap-3 sm:grid-cols-2 ${enabled ? "" : "pointer-events-none opacity-40"}`}>
+          <label className="space-y-1.5">
+            <span className="text-xs text-[var(--muted)]">Пропорции по умолчанию</span>
+            <select value={settings.aspect ?? "1:1"} onChange={(e) => set({ aspect: e.target.value })} className={field}>
+              {["1:1", "4:3", "3:4", "16:9", "9:16"].map((a) => <option key={a} value={a}>{a}</option>)}
+            </select>
+          </label>
+          <label className="flex items-center gap-3 self-end pb-2 text-sm">
+            <input type="checkbox" checked={settings.allowEdit === true} onChange={(e) => set({ allowEdit: e.target.checked })} className="h-4 w-4 accent-[var(--accent)]" />
+            Разрешить правку картинок
+          </label>
+        </div>
+      )}
+      <div className="flex items-center gap-3">
+        <button onClick={apply} disabled={!dirty || busy} className={primary}>{busy ? "…" : st.outdated && enabled === st.installed ? "Обновить" : "Применить"}</button>
+        {status && <span className={`text-sm ${status.ok ? "text-[var(--green)]" : "text-[var(--red)]"}`}>{status.text}</span>}
+        <span className="flex-1" />
+        {st.installed && <span className="truncate font-mono text-[11px] text-[var(--faint)]" title={toolBin(tool)}>{toolBin(tool).replace(/^\/home\/codex/, "~")}</span>}
+      </div>
+    </div>
+  );
+}
+
+// Ранние версии ставили картинки как MCP-сервер и клали файлы прямо в ~/.codex/paddock — убираем, чтобы модель не путалась.
+async function cleanupLegacyImages(request: Request) {
+  await request("config/batchWrite", { edits: [{ keyPath: "mcp_servers.paddock_images", value: null, mergeStrategy: "replace" }], reloadUserConfig: true }).catch(() => {});
+  for (const f of ["images-mcp.mjs", "paddock-images.mjs", "images.json"]) await request("fs/remove", { path: `/home/codex/.codex/paddock/${f}`, force: true }).catch(() => {});
+}
+
+// Что доступно агенту в этом окне: включённые скиллы для папки чата и установленные инструменты Paddock.
+// «Использован» — агент в этом чате читал SKILL.md или запускал команду инструмента.
+export function SessionTools({ request, cwd, commands }: { request: Request; cwd: string; commands: string[] }) {
+  const [open, setOpen] = useState(false);
+  const [skills, setSkills] = useState<Skill[] | null>(null);
+  const [tools, setTools] = useState<Tool[]>([]);
+
+  useEffect(() => {
+    let alive = true;
+    listSkills(request, cwd).then((s) => alive && setSkills(s.filter((x) => x.enabled))).catch(() => alive && setSkills([]));
+    loadRegistry().then(async (all) => {
+      const st = await Promise.all(all.map((t) => toolState(request, t)));
+      if (alive) setTools(all.filter((_, i) => st[i].installed));
+    }).catch(() => {});
+    return () => { alive = false; };
+  }, [request, cwd, open]);
+
+  const used = useMemo(() => {
+    const u = new Set<string>();
+    for (const c of commands) {
+      for (const s of skills ?? []) if (c.includes(s.path) || c.includes(`/skills/${s.name}/`)) u.add(`s:${s.name}`);
+      for (const t of tools) if (c.includes(t.bin)) u.add(`t:${t.id}`);
+    }
+    return u;
+  }, [commands, skills, tools]);
+
+  if (!skills) return null;
+  return (
+    <span className="relative">
+      <button onClick={() => setOpen((o) => !o)} className="rounded px-1 hover:bg-[var(--panel-2)] hover:text-[var(--fg)]" title="Скиллы и инструменты этого чата">
+        <span className="text-[var(--yellow)]">⚡</span> {skills.length} skills · {tools.length} cli{used.size > 0 && <span className="text-[var(--green)]"> · {used.size} used</span>}
+      </button>
+      {open && (
+        <div className="absolute bottom-full left-0 z-30 mb-2 max-h-80 w-80 overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--panel)] p-2 text-[12px] shadow-2xl shadow-black/60" onMouseLeave={() => setOpen(false)}>
+          <div className="px-1 pb-1 text-[11px] uppercase tracking-wide text-[var(--faint)]">CLI Paddock</div>
+          {tools.length === 0 && <div className="px-1 pb-1 text-[var(--faint)]">нет — включаются в Настройки → Инструменты</div>}
+          {tools.map((t) => (
+            <div key={t.id} className="flex items-center gap-2 px-1 py-0.5">
+              <span className={used.has(`t:${t.id}`) ? "text-[var(--green)]" : "text-[var(--faint)]"}>{used.has(`t:${t.id}`) ? "●" : "○"}</span>
+              <span className="flex-1 truncate">{t.bin.replace(/\.mjs$/, "")}</span>
+              <span className="text-[var(--faint)]">{t.name}</span>
+            </div>
+          ))}
+          <div className="px-1 pb-1 pt-2 text-[11px] uppercase tracking-wide text-[var(--faint)]">Скиллы</div>
+          {skills.map((s) => (
+            <div key={s.path} className="flex items-center gap-2 px-1 py-0.5" title={s.description}>
+              <span className={used.has(`s:${s.name}`) ? "text-[var(--green)]" : "text-[var(--faint)]"}>{used.has(`s:${s.name}`) ? "●" : "○"}</span>
+              <span className="flex-1 truncate">{s.name}</span>
+              <span className="text-[var(--faint)]">{scopeLabel[s.scope] ?? s.scope}</span>
+            </div>
+          ))}
+          <div className="px-1 pt-2 text-[11px] text-[var(--faint)]">● — использован в этом чате</div>
+        </div>
+      )}
+    </span>
+  );
+}

@@ -1,0 +1,35 @@
+# Шаблон пользователя: add-user.sh подставляет __USER__.
+services:
+  codex-__USER__:
+    build: ./codex
+    image: codex-hub-codex
+    depends_on: [egress]
+    command:
+      - codex
+      - app-server
+      - --listen
+      - ws://0.0.0.0:4500
+      - --ws-auth
+      - capability-token
+      - --ws-token-file
+      - /run/secrets/ws-token
+    environment:
+      HTTPS_PROXY: http://egress:8080
+      HTTP_PROXY: http://egress:8080
+      NO_PROXY: localhost,127.0.0.1
+    volumes:
+      - codex-home-__USER__:/home/codex/.codex
+      - workspace-__USER__:/workspace
+      - ./secrets/tokens/__USER__.token:/run/secrets/ws-token:ro
+      # __ADMIN_MOUNT__
+    networks: [core]
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 6g
+    cpus: 4
+    pids_limit: 1024
+
+volumes:
+  codex-home-__USER__: {}
+  workspace-__USER__: {}

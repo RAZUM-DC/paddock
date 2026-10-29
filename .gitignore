@@ -1,0 +1,10 @@
+secrets/
+.env
+node_modules/
+.next/
+users/*.yml
+!users/_template.yml
+web/.next/
+web/next-env.d.ts
+web/*.tsbuildinfo
+web/.deploy-*

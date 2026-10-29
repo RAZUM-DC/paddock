@@ -1,0 +1,78 @@
+# Optional override: harnesses on demand, one internal network per user.
+#   docker compose -f docker-compose.yml -f docker-compose.provisioner.yml up -d --build
+# (or add it to COMPOSE_FILE in .env, after docker-compose.yml).
+#
+# - provisioner: the only container with the Docker socket. It is on `control` only, which it shares with web,
+#   and creates harness-<id> on its own internal network paddock-u-<id> (see docs/services/provisioner/README.md).
+# - web and egress get fixed container names, because the provisioner attaches them to every user network by name.
+# - Harnesses made by add-user.sh keep working on `core` as before; both kinds can run side by side.
+#
+# Secrets (not in git):
+#   secrets/provisioner.env  PROVISIONER_TOKEN=<openssl rand -hex 32>  (+ optional HARNESS_*, LLM_*, MCP_SERVERS_JSON)
+#   secrets/web.env          PROVISIONER_URL=http://provisioner:8080  PROVISIONER_TOKEN=<the same value>
+#   secrets/user-env/<id>.env  optional per-user env for the harness (e.g. LLM_API_KEY=...)
+# The harness image must exist locally: docker compose --profile images build harness-image
+
+networks:
+  # web ↔ provisioner only. internal: no way out; neither egress nor any harness is ever attached, so nothing a
+  # harness can steer (its own traffic, or the egress proxy) can reach the provisioner.
+  control:
+    internal: true
+  # web → the gost API of egress. A fixed subnet, so gost can admit only this network on the API port
+  # (docs/services/egress/gost.example.yaml, hardened variant). Change it if it overlaps a network you have.
+  egress-api:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${PADDOCK_EGRESS_API_SUBNET:-10.254.254.0/29}
+
+services:
+  web:
+    container_name: paddock-web
+    networks: [core, control, egress-api]
+    environment:
+      # The gost API through `egress-api` (the alias exists on no user network).
+      GOST_API: http://egress-api:18080/api
+      NO_PROXY: localhost,127.0.0.1,web,egress,egress-api,provisioner
+
+  egress:
+    container_name: paddock-egress
+    networks:
+      core: {}
+      outside: {}
+      egress-api:
+        aliases: [egress-api]
+
+  provisioner:
+    build: ./provisioner
+    container_name: paddock-provisioner
+    env_file: ./secrets/provisioner.env
+    environment:
+      PROVISIONER_CONTAINER: paddock-provisioner
+      WEB_CONTAINER: paddock-web
+      EGRESS_CONTAINER: paddock-egress
+      TOKENS_DIR: /run/secrets/tokens
+      USER_ENV_DIR: /run/secrets/user-env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Written here (token files), read by web (ro) and bind-mounted into each harness from the host path.
+      - ./secrets/tokens:/run/secrets/tokens
+      - ./secrets/user-env:/run/secrets/user-env:ro
+    networks: [control]
+    restart: unless-stopped
+    read_only: true
+    # Root in the container (the socket is root-equivalent anyway); DAC_OVERRIDE only to write token files into
+    # secrets/tokens, which belongs to the host user who ran add-user.sh.
+    cap_drop: [ALL]
+    cap_add: [DAC_OVERRIDE]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 128m
+    cpus: 0.5
+
+  # Build-only: the image the provisioner starts harnesses from (users/*.yml build it too, when there are any).
+  harness-image:
+    build: ./codex
+    image: paddock-harness-codex
+    profiles: [images]
+    entrypoint: ["true"]
+    network_mode: none

@@ -66,11 +66,38 @@ browser ──HTTPS/WS──▶ edge(nginx) ──▶ web(Next.js, WS bridge) �
 |---|---|---|
 | harness ↔ internet | `core` network with `internal: true`, the only way out is egress | a direct request fails |
 | harness ↔ LAN/host/docker0 | egress refuses private networks | curl to 192.168.x or the host is refused |
-| user ↔ user | own container, own volumes, own capability token | ⬜ shared `core` network, see roadmap 3.9 |
+| user ↔ user | own container, own volumes, own capability token; with the provisioner also an own internal network `paddock-u-<id>` | ⬜ add-user.sh harnesses share `core` (roadmap 3.9); provisioned ones: see below, not yet verified on a live Docker |
 | web UI login | password 12+ chars and 2FA (TOTP: Authy etc.), rate limit per client IP (X-Forwarded-For from Traefik/edge, only private networks are trusted) | `tests/two-factor.mjs` |
 | browser ↔ harness | only the web UI holds the token; the WS bridge checks the cookie session and Origin | 401 without cookie, 403 from a foreign Origin |
 | web UI ↔ egress API | gost API only on `core` and behind a password known to the web UI | 401 from a harness |
 | containers | `cap_drop: ALL`, `no-new-privileges`, memory/CPU limits | compose |
+
+## Per-user networks (optional provisioner)
+
+With `docker-compose.provisioner.yml`, harnesses are created by the provisioner, one internal network per user:
+
+```
+             control (internal)                 egress-api (internal, fixed subnet)
+ provisioner ─────────────── web ──────────────────────────────── egress :18080 (gost API)
+ (docker.sock)                │ \
+                              │  \ paddock-u-alice (internal): web, egress (alias "egress"), harness-alice
+                              │   \ paddock-u-bob   (internal): web, egress (alias "egress"), harness-bob
+                              core (internal): web, egress, edge, add-user.sh harnesses
+```
+
+What a provisioned harness can reach on its network, and nothing else:
+
+| peer | port | protection |
+|---|---|---|
+| its own harness | — | — |
+| egress | `:8080` HTTP proxy | the bypass refuses private targets and internal names (gost.example.yaml). **Egress sits on every user network, so a proxy without that bypass is a bridge to other harnesses** (they still require their capability token). |
+| egress | `:18080` gost API | password; the hardened variant admits only the `egress-api` network |
+| egress | `:18100+` probe ports (when a proxy chain is configured) | none: each forwards through one upstream proxy, like `:8080` but without the bypass. The upstream proxy cannot reach Docker-internal addresses, but if an upstream proxy runs on the same host/LAN, treat these ports as an open path |
+| web | `:3000` HTTP + WS | the same as from the browser: session cookie, `Origin` check. Web sits on every user network |
+| other harnesses, provisioner, edge | — | not on this network: no route |
+
+Not verified yet (needs a live Docker host): that Docker's `internal` bridge networks indeed drop traffic between
+two of them through the shared containers (they should: web and egress do not route), and the egress config.
 
 ## Where state lives (everything is portable as volumes — the basis of "mobility")
 
@@ -78,7 +105,7 @@ browser ──HTTPS/WS──▶ edge(nginx) ──▶ web(Next.js, WS bridge) �
 |---|---|---|
 | `harness-home-<user>` | `~/.codex`: sessions, archive, config.toml, ChatGPT login, skills, Paddock tools (`paddock/tools/`) | harness; the web UI via its API |
 | `workspace-<user>` | `/workspace`: projects, images (`images/`), attachments (`.paddock/uploads/`) | harness |
-| `web-data` | `auth.db`: web UI users and sessions | web |
+| `web-data` | `auth.db`: web UI users and sessions, user → harness mapping, last OIDC groups | web |
 | `web-builds` | current and previous web UI builds | supervisor |
 | `secrets/` (directory on the host) | harness tokens, `web.env`, `egress/gost.yaml` with proxy passwords | admin; the web UI (proxies via the gost API) |
 

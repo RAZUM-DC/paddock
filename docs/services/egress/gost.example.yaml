@@ -76,8 +76,8 @@ api:
     password: CHANGE_ME_TO_A_LONG_RANDOM_PASSWORD
 
 # Hardened variant for docker-compose.provisioner.yml (also to verify): drop the `api:` block above and run the API as a
-# service that admits only the `control` network (PADDOCK_CONTROL_SUBNET, default 172.31.255.0/28), where web reaches
-# it as egress-api:18080. Harnesses connect from their own networks and are refused before the password is checked.
+# service that admits only the `egress-api` network (PADDOCK_EGRESS_API_SUBNET, default 10.254.254.0/29), where web
+# reaches it as egress-api:18080. Harnesses connect from their own networks and are refused before the password check.
 #
 # services:
 #   - name: api
@@ -96,7 +96,7 @@ api:
 #   - name: control-only
 #     whitelist: true
 #     matchers:
-#       - 172.31.255.0/28
+#       - 10.254.254.0/29
 
 log:
   level: info

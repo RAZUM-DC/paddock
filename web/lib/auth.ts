@@ -13,14 +13,21 @@ export const db = new Database(process.env.AUTH_DB ?? "/data/auth.db");
 
 // User → harness, fixed on first use: password users keep the part of their email before "@" (harness-<name> from
 // add-user.sh), see lib/identity.ts. Stored so that a later change of the rule never moves anybody to another harness.
-db.exec(`CREATE TABLE IF NOT EXISTS harness_users (
-  user_id TEXT PRIMARY KEY,
-  harness_id TEXT NOT NULL UNIQUE,
-  created_at INTEGER NOT NULL
-)`);
+// Created after better-auth's migrations (ensureDb) or on first use, never at import: better-auth checks the schema
+// when it starts, and a database that has only our tables looks to it like a half-migrated one.
+let ownTables = false;
+function ensureOwnTables() {
+  if (ownTables) return;
+  db.exec(`CREATE TABLE IF NOT EXISTS harness_users (
+    user_id TEXT PRIMARY KEY,
+    harness_id TEXT NOT NULL UNIQUE,
+    created_at INTEGER NOT NULL
+  )`);
+  setupOidcTables(db);
+  ownTables = true;
+}
 
 const oidc = oidcEnv();
-setupOidcTables(db);
 const harnessSalt = process.env.HARNESS_ID_SALT ?? "";
 if (oidc && !harnessSalt) console.warn("HARNESS_ID_SALT is empty: OIDC harness ids are derived from the issuer and subject only");
 
@@ -52,6 +59,7 @@ export const auth = betterAuth(options);
 export async function ensureDb() {
   const { runMigrations } = await getMigrations(options);
   await runMigrations();
+  ensureOwnTables();
 }
 
 // The rule for password users (scripts/create-user.ts checks the name with it before creating the login).
@@ -59,12 +67,12 @@ export const codexUserOf = legacyHarnessId;
 
 type SessionUser = { id: string; email: string };
 
-const storedHarness = db.prepare("SELECT harness_id FROM harness_users WHERE user_id = ?");
-const storeHarness = db.prepare("INSERT OR IGNORE INTO harness_users (user_id, harness_id, created_at) VALUES (?, ?, ?)");
+const storedHarness = { get: (userId: string) => (ensureOwnTables(), db.prepare("SELECT harness_id FROM harness_users WHERE user_id = ?").get(userId)) };
+const storeHarness = { run: (userId: string, id: string, at: number) => (ensureOwnTables(), db.prepare("INSERT OR IGNORE INTO harness_users (user_id, harness_id, created_at) VALUES (?, ?, ?)").run(userId, id, at)) };
 // Lazy: the account table is better-auth's and appears only after ensureDb().
 const accountsOf = (userId: string) => db.prepare(`SELECT "providerId", "accountId" FROM "account" WHERE "userId" = ?`).all(userId) as { providerId: string; accountId: string }[];
 const oidcAdminOf = (issuer: string, userId: string) =>
-  (db.prepare(`SELECT i.admin FROM "account" a JOIN oidc_identities i ON i.sub = a."accountId" AND i.issuer = ?
+  (ensureOwnTables(), db.prepare(`SELECT i.admin FROM "account" a JOIN oidc_identities i ON i.sub = a."accountId" AND i.issuer = ?
     WHERE a."userId" = ? AND a."providerId" = ?`).get(issuer, userId, OIDC_PROVIDER_ID) as { admin: number } | undefined)?.admin === 1;
 
 // The harness of a signed-in user: harness-<id>, secrets/tokens/<id>.token. Throws when there is none — callers answer 403.

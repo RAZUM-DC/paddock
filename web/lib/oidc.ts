@@ -60,14 +60,14 @@ export function setupOidcTables(db: Database.Database) {
 }
 
 export function oidcPlugin(db: Database.Database, o: OidcEnv, publicUrl: string) {
-  setupOidcTables(db);
   // Prepared on first use: better-auth's own tables (session, account) only exist after ensureDb() has run.
   const saveIdentity = (sub: string, admin: boolean, groups: string[]) =>
-    db.prepare(`INSERT INTO oidc_identities (issuer, sub, admin, groups, updated_at) VALUES (?, ?, ?, ?, ?)
+    (setupOidcTables(db), db).prepare(`INSERT INTO oidc_identities (issuer, sub, admin, groups, updated_at) VALUES (?, ?, ?, ?, ?)
       ON CONFLICT (issuer, sub) DO UPDATE SET admin = excluded.admin, groups = excluded.groups, updated_at = excluded.updated_at`)
       .run(o.issuer, sub, admin ? 1 : 0, JSON.stringify(groups), Date.now());
   // Removed from the groups: every session of that person ends now, and admin rights with them.
   const shutOut = (sub: string) => {
+    setupOidcTables(db);
     db.prepare(`DELETE FROM "session" WHERE "userId" IN (SELECT "userId" FROM "account" WHERE "providerId" = ? AND "accountId" = ?)`).run(OIDC_PROVIDER_ID, sub);
     db.prepare(`UPDATE oidc_identities SET admin = 0, groups = '[]', updated_at = ? WHERE issuer = ? AND sub = ?`).run(Date.now(), o.issuer, sub);
   };

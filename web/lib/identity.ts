@@ -8,9 +8,11 @@ export const HARNESS_ID_RE = /^u-[0-9a-f]{12}$|^[a-z0-9-]{1,32}$/;
 export const isValidHarnessId = (id: unknown): id is string => typeof id === "string" && HARNESS_ID_RE.test(id);
 
 // Legacy rule: "alice@hub.local" works with harness-alice (add-user.sh creates it).
+// u-<12 hex> is reserved for OIDC users, so a password login can never be handed someone's derived harness.
+export const OIDC_ID_RE = /^u-[0-9a-f]{12}$/;
 export function legacyHarnessId(email: string): string {
   const name = email.split("@")[0];
-  if (!/^[a-z0-9-]+$/.test(name)) throw new Error(`bad codex user: ${name}`);
+  if (!/^[a-z0-9-]{1,32}$/.test(name) || OIDC_ID_RE.test(name)) throw new Error(`bad codex user: ${name}`);
   return name;
 }
 

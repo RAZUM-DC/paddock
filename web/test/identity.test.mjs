@@ -31,6 +31,11 @@ test("legacyHarnessId: email local part, a-z0-9- only", () => {
   assert.throws(() => legacyHarnessId("first.last@corp.example"));
   assert.throws(() => legacyHarnessId("Alice@hub.local"));
   assert.throws(() => legacyHarnessId("@hub.local"));
+  // The OIDC shape is reserved, and names are at most 32 characters (container and network names).
+  assert.throws(() => legacyHarnessId("u-0123456789ab@hub.local"));
+  assert.equal(legacyHarnessId("u-0123456789abc@hub.local"), "u-0123456789abc");
+  assert.equal(legacyHarnessId("a".repeat(32) + "@hub.local"), "a".repeat(32));
+  assert.throws(() => legacyHarnessId("a".repeat(33) + "@hub.local"));
 });
 
 test("chooseHarnessId: a stored id always wins", () => {

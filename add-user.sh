@@ -8,7 +8,8 @@ cd "$(dirname "$0")"
 
 U="${1:?usage: ./add-user.sh <name> [--admin]  (a-z0-9-)}"
 ADMIN="${2:-}"
-[[ "$U" =~ ^[a-z0-9-]+$ ]] || { echo "bad name: $U"; exit 1; }
+[[ "$U" =~ ^[a-z0-9-]{1,32}$ ]] || { echo "bad name: $U"; exit 1; }
+[[ "$U" =~ ^u-[0-9a-f]{12}$ ]] && { echo "bad name: $U (u-<12 hex> is reserved for single sign-on users)"; exit 1; }
 [ -f "users/$U.yml" ] && { echo "user $U already exists"; exit 1; }
 
 mkdir -p secrets/tokens && chmod 700 secrets

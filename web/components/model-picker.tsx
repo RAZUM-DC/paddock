@@ -11,11 +11,13 @@ export type Model = {
   defaultReasoningEffort: string;
   supportedReasoningEfforts: { reasoningEffort: string; description: string }[];
   provider?: string; // нет — подписка ChatGPT (провайдер openai)
+  providerName?: string; // the provider's display name from config.toml (model_providers.<id>.name)
   context?: number | null;
 };
 export type Selection = { model: string; effort: string; provider?: string };
 
-const groupName = (p?: string) => (p === "neuraldeep" ? "NeuralDeep" : "ChatGPT");
+const groupName = (p: string | undefined, models: Model[]) =>
+  p === "neuraldeep" ? "NeuralDeep" : p && p !== "openai" ? models.find((m) => m.provider === p)?.providerName ?? p : "ChatGPT";
 const same = (m: Model, v: Selection | null) => !!v && m.model === v.model && (m.provider ?? "openai") === (v.provider ?? "openai");
 
 export function ModelPicker({ models, value, onChange }: { models: Model[]; value: Selection | null; onChange: (s: Selection) => void }) {
@@ -43,7 +45,7 @@ export function ModelPicker({ models, value, onChange }: { models: Model[]; valu
         className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-[15px] font-medium hover:bg-[var(--panel)]"
       >
         {current?.displayName ?? value?.model ?? t("Model")}
-        {value?.provider === "neuraldeep" && <span className="rounded-md bg-[var(--teal)]/15 px-1.5 py-0.5 font-mono text-[11px] text-[var(--teal)]">nd</span>}
+        {value?.provider && value.provider !== "openai" && <span className="rounded-md bg-[var(--teal)]/15 px-1.5 py-0.5 font-mono text-[11px] text-[var(--teal)]">{value.provider === "neuraldeep" ? "nd" : value.provider.slice(0, 12)}</span>}
         {value?.effort && <span className="rounded-md bg-[var(--panel-2)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--accent)]">{value.effort}</span>}
         <Icon name="chevron" size={15} className={`text-[var(--muted)] transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
@@ -53,7 +55,7 @@ export function ModelPicker({ models, value, onChange }: { models: Model[]; valu
           <div className="max-h-80 overflow-y-auto p-1.5">
             {groups.map((g) => (
               <div key={g ?? "openai"}>
-                {groups.length > 1 && <div className="px-2.5 pb-1 pt-2 text-[10.5px] uppercase tracking-wider text-[var(--faint)]">{groupName(g)}</div>}
+                {groups.length > 1 && <div className="px-2.5 pb-1 pt-2 text-[10.5px] uppercase tracking-wider text-[var(--faint)]">{groupName(g, models)}</div>}
             {models.filter((m) => m.provider === g).map((m) => (
               <button
                 key={`${m.provider ?? "openai"}:${m.id}`}

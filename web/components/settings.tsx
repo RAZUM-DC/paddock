@@ -215,10 +215,14 @@ function CodexTab({ models, request }: { models: Model[]; request: Request }) {
   const [cfg, setCfg] = useState<CodexConfig | null>(null);
   const [initial, setInitial] = useState<CodexConfig | null>(null);
   const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
+  // A custom provider set in config.toml (e.g. by the provisioner): shown, never rewritten from here.
+  const [provider, setProvider] = useState<{ id: string; name: string } | null>(null);
 
   useEffect(() => {
     request("config/read", {}).then((r) => {
       const c = r.config;
+      const pid = typeof c.model_provider === "string" && c.model_provider !== "openai" ? c.model_provider : null;
+      setProvider(pid ? { id: pid, name: c.model_providers?.[pid]?.name || pid } : null);
       const v: CodexConfig = {
         model: c.model ?? "",
         model_reasoning_effort: c.model_reasoning_effort ?? "",
@@ -265,10 +269,15 @@ function CodexTab({ models, request }: { models: Model[]; request: Request }) {
   return (
     <div className="space-y-5">
       <p className="text-sm text-[var(--muted)]">{t("This is")} <span className="font-mono">~/.codex/config.toml</span> {t("in your container: defaults for new chats. The model picker in the header overrides them on the fly.")}</p>
+      {provider && (
+        <p className="rounded-xl bg-[var(--panel-2)] p-3 text-sm">
+          {t("Model provider")}: <span className="font-medium">{provider.name}</span> <span className="font-mono text-xs text-[var(--faint)]">model_provider = &quot;{provider.id}&quot;</span>
+        </p>
+      )}
       <div className="grid gap-4 sm:grid-cols-2">
         <label className="space-y-1.5">
           <span className="text-xs text-[var(--muted)]">{t("Default model")}</span>
-          {select("model", [["", t("Codex default")], ...models.map((m) => [m.model, m.displayName] as const)])}
+          {select("model", [["", t("Codex default")], ...(initial.model && !models.some((m) => m.model === initial.model) ? [[initial.model, initial.model] as const] : []), ...models.map((m) => [m.model, m.displayName] as const)])}
         </label>
         <label className="space-y-1.5">
           <span className="text-xs text-[var(--muted)]">{t("Reasoning effort")}</span>

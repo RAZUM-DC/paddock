@@ -37,6 +37,7 @@ const ru: Record<string, string> = {
   "This is": "Это",
   "in your container: defaults for new chats. The model picker in the header overrides them on the fly.": "твоего контейнера: значения по умолчанию для новых чатов. Модель в шапке переопределяет их на ходу.",
   "Default model": "Модель по умолчанию",
+  "Model provider": "Провайдер моделей",
   "Codex default": "по умолчанию Codex",
   "model default": "как у модели",
   "When to ask for approval": "Когда спрашивать разрешение",

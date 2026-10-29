@@ -16,6 +16,7 @@ import { CWD, Pane, type PaneCommand, type PaneHandle, type PaneState } from "./
 import { Settings, type LoginEvent } from "./settings";
 import { Sidebar, type ThreadInfo } from "./sidebar";
 import { WorkspaceStatus } from "./workspace-status";
+import { configuredProviderModels } from "@/lib/providers";
 import type { RateLimits } from "./status-bar";
 
 const PANES = 4;
@@ -44,6 +45,10 @@ function Workspace({ email }: { email: string }) {
   };
   const [models, setModels] = useState<Model[]>([]);
   const [ndModels, setNdModels] = useState<Model[]>([]);
+  // The provider config.toml makes active (e.g. seeded by the provisioner with env_key): its default model is offered
+  // in the picker. Its key lives in the harness environment, so web cannot list the provider's other models.
+  const [cfgModels, setCfgModels] = useState<Model[]>([]);
+  const extraModels = useMemo(() => [...ndModels, ...cfgModels], [ndModels, cfgModels]);
   const [defaultSel, setDefaultSel] = useState<Selection | null>(null);
   const [limits, setLimits] = useState<RateLimits | null>(null);
   const [account, setAccount] = useState<AccountInfo | null>(null);
@@ -186,7 +191,8 @@ function Workspace({ email }: { email: string }) {
         const ok = sel && (sel.provider ? true : ms.some((m) => m.model === sel.model));
         // Без своего выбора — то, что задано в config.toml харнесса: у пользователя только с NeuralDeep там
         // model_provider = "neuraldeep", а model/list всё равно советует модель OpenAI, к которой у него нет доступа.
-        const cfg = ok ? null : await c.request("config/read", {}).then((r) => r.config).catch(() => null);
+        const cfg = await c.request("config/read", {}).then((r) => r.config).catch(() => null);
+        setCfgModels(configuredProviderModels(cfg));
         const own = cfg?.model && cfg?.model_provider && cfg.model_provider !== "openai" ? { model: cfg.model as string, effort: "", provider: cfg.model_provider as string } : null;
         setDefaultSel(ok ? sel : own ?? (def ? { model: def.model, effort: def.defaultReasoningEffort } : null));
         if (!first) for (const h of handles) h.current?.reconnected();
@@ -491,7 +497,7 @@ function Workspace({ email }: { email: string }) {
                   api={api}
                   connected={connected}
                   models={models}
-                  ndModels={ndModels}
+                  ndModels={extraModels}
                   defaultSel={defaultSel}
                   limits={limits}
                   command={commands[i]}

@@ -3,9 +3,14 @@
 // fs/* app-server'а и skills/list; другой харнесс даст свой адаптер с тем же набором.
 type Request = (method: string, params: unknown) => Promise<any>;
 
+import { getLang } from "./i18n";
+
+export const localized = (v: string | Record<string, string>) => (typeof v === "string" ? v : v[getLang()] ?? v.en ?? Object.values(v)[0] ?? "");
+
 export const HARNESS_HOME = "/home/codex/.codex";
 
-export type Tool = { id: string; name: string; description: string; bin: string; skill: string; needs?: string; script: string; skillText: string };
+// name и description — строка или { en, ru }: плагины пишут на своём языке, морда показывает язык интерфейса.
+export type Tool = { id: string; name: string | Record<string, string>; description: string | Record<string, string>; bin: string; skill: string; needs?: string; script: string; skillText: string };
 export type Skill = { name: string; description: string; path: string; scope: string; enabled: boolean };
 export type ToolState = { installed: boolean; outdated: boolean; settings: Record<string, unknown> };
 
@@ -32,7 +37,7 @@ export function loadRegistry(): Promise<Tool[]> {
 
 const readText = (request: Request, path: string) => request("fs/readFile", { path }).then((f) => unb64(f.dataBase64), () => null);
 
-// Установлен = есть скилл и команда; устарел = команда в харнессе не совпадает с реестром (морду обновили).
+// Установлен = есть скилл и команда; устарел = команда или скилл в харнессе не совпадают с реестром (морду обновили).
 export async function toolState(request: Request, t: Tool): Promise<ToolState> {
   const [skill, script, settings] = await Promise.all([
     readText(request, `${skillDir(t)}/SKILL.md`),
@@ -43,7 +48,7 @@ export async function toolState(request: Request, t: Tool): Promise<ToolState> {
   try {
     parsed = JSON.parse(settings ?? "{}");
   } catch {}
-  return { installed: skill != null && script != null, outdated: script != null && script !== t.script, settings: parsed };
+  return { installed: skill != null && script != null, outdated: (script != null && script !== t.script) || (skill != null && skill !== t.skillText.replaceAll("{{BIN}}", toolBin(t))), settings: parsed };
 }
 
 export async function installTool(request: Request, t: Tool, settings: Record<string, unknown>) {

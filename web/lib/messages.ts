@@ -1,6 +1,7 @@
 // Перевод тредов и событий Codex в сообщения для assistant-ui.
 // Один ход Codex = сообщение пользователя + одно сообщение ассистента со всеми частями хода.
 import type { ThreadMessageLike } from "@assistant-ui/react";
+import { t as tr } from "./i18n";
 
 export type ToolKind = "shell" | "read" | "search" | "list" | "patch" | "mcp" | "web" | "tool";
 export type WebLink = { title: string; url: string | null; domain: string | null; snippet: string | null };
@@ -14,8 +15,30 @@ export type Part =
 
 // Что известно о ходе: какой моделью отвечали, сколько шёл. Модель в истории Codex не хранится,
 // поэтому её запоминаем сами (localStorage), а для старых ходов берём модель треда.
-// outTokens — сумма выходных токенов всех вызовов модели за ход, ttftMs — время до первого токена, usage — последний расход (контекст, кеш): Codex его при открытии чата не отдаёт (для скорости под ответом).
+// outTokens — сумма выходных токенов всех вызовов модели за ход и ttftMs — время до первого токена (для скорости под ответом);
+// usage — последний расход (контекст, кеш): Codex его при открытии чата не отдаёт.
 export type TurnMeta = { model?: string | null; effort?: string | null; durationMs?: number | null; startedAt?: number; outTokens?: number; ttftMs?: number; usage?: unknown };
+
+// Действие агента для ленты в правой панели (как Agent actions в agentbelt): что делал, сколько шло, упало ли.
+export type Action = { id: string; kind: ToolKind; title: string; ok: boolean | null; durationMs: number | null; output: string; diff: string; at: number | null };
+
+export function actionsOf(messages: Msg[], seen: Record<string, number>): Action[] {
+  const out: Action[] = [];
+  for (const m of messages)
+    for (const p of m.parts)
+      if (p.type === "tool-call")
+        out.push({
+          id: p.itemId,
+          kind: p.args.kind,
+          title: p.args.title,
+          ok: p.result === undefined ? null : !p.isError,
+          durationMs: p.args.durationMs,
+          output: (p.result ?? "").slice(0, 4000),
+          diff: (p.args.files ?? []).map((f) => `@@ ${f.path}\n${f.diff}`).join("\n").slice(0, 8000),
+          at: seen[p.itemId] ?? null,
+        });
+  return out;
+}
 
 export type Msg = { id: string; role: "user" | "assistant"; turnId: string; parts: Part[]; running?: boolean; meta?: TurnMeta };
 
@@ -42,7 +65,7 @@ function commandPart(item: any): Part {
   const extra = { result, isError: item.exitCode != null && item.exitCode !== 0, argsText: cmd };
   const only = (t: string) => actions.length > 0 && actions.every((a) => a.type === t);
   if (only("read")) return tool(item, "read", actions.map((a) => a.name ?? a.path).join(", "), extra);
-  if (only("search")) return tool(item, "search", actions.map((a) => [a.query, a.path && `в ${a.path}`].filter(Boolean).join(" ")).join(", "), extra);
+  if (only("search")) return tool(item, "search", actions.map((a) => [a.query, a.path && tr("в {path}", { path: a.path })].filter(Boolean).join(" ")).join(", "), extra);
   if (only("listFiles")) return tool(item, "list", actions.map((a) => a.path ?? ".").join(", "), extra);
   return tool(item, "shell", cmd.split("\n")[0], extra);
 }
@@ -62,7 +85,7 @@ export function itemToPart(item: any): Part | null {
     case "reasoning":
       return { type: "reasoning", itemId: item.id, text: (item.summary ?? []).join("\n\n") };
     case "contextCompaction":
-      return { type: "reasoning", itemId: item.id, text: "Контекст сжат" };
+      return { type: "reasoning", itemId: item.id, text: tr("Контекст сжат") };
     case "commandExecution":
       return commandPart(item);
     case "fileChange": {
@@ -92,7 +115,7 @@ export function itemToPart(item: any): Part | null {
     case "webSearch": {
       const a = item.action ?? {};
       const verb = a.type === "openPage" ? "Open" : a.type === "findInPage" ? "Find" : "Search";
-      const title = a.type === "openPage" ? a.url : a.type === "findInPage" ? `${a.pattern ?? ""} в ${a.url ?? ""}` : a.query ?? a.queries?.join(", ") ?? item.query;
+      const title = a.type === "openPage" ? a.url : a.type === "findInPage" ? tr("{pattern} в {url}", { pattern: a.pattern ?? "", url: a.url ?? "" }) : a.query ?? a.queries?.join(", ") ?? item.query;
       const links: WebLink[] = (item.results ?? []).map((r: any) => ({ title: r.title ?? r.url ?? "", url: r.url ?? null, domain: r.domain ?? null, snippet: r.snippet ?? null }));
       const p = tool(item, "web", title ?? item.query ?? "", { result: item.results == null ? undefined : `${links.length}` });
       if (p.type === "tool-call") p.args = { ...p.args, verb, links };
@@ -119,7 +142,7 @@ export function turnsToMessages(turns: any[], meta: (turnId: string) => TurnMeta
         if (p) parts.push(p);
       }
     }
-    if (turn.error) parts.push({ type: "text", itemId: `err-${turn.id}`, text: `⚠️ ${turn.error.message ?? "ошибка хода"}` });
+    if (turn.error) parts.push({ type: "text", itemId: `err-${turn.id}`, text: `⚠️ ${turn.error.message ?? tr("ошибка хода")}` });
     const running = turn.status === "inProgress";
     out.push({
       id: `a-${turn.id}`,

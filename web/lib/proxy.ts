@@ -70,16 +70,80 @@ export async function saveNodes(input: ProxyInput[]) {
   });
   chain.hops = [hop];
   await gost(`/config/chains/${CHAIN}`, { method: "PUT", body: JSON.stringify(chain) });
+  await syncProbes(hop.nodes);
   await gost("/config?format=yaml", { method: "POST" }); // сохранить в gost.yaml, чтобы пережило рестарт
 }
 
+// Пробные входы: на каждый прокси свой порт в egress (18100+i) с цепочкой из одного этого узла.
+// Через них морда меряет каждый прокси отдельно — пароли остаются в gost, наружу не уходят.
+// Порты живут только в сети core, как и основной :8080: агент через них попадёт лишь в тот же прокси.
+const PROBE_PORT = 18100;
+export async function syncProbes(nodes?: any[]) {
+  nodes ??= (await readChain()).hops?.[0]?.nodes ?? [];
+  const cfg = (await gost("/config")).data ?? (await gost("/config"));
+  for (const sv of cfg.services ?? []) if (sv.name.startsWith("probe-")) await gost(`/config/services/${sv.name}`, { method: "DELETE" });
+  for (const ch of cfg.chains ?? []) if (ch.name.startsWith("probe-")) await gost(`/config/chains/${ch.name}`, { method: "DELETE" });
+  for (const [i, n] of nodes!.entries()) {
+    await gost("/config/chains", { method: "POST", body: JSON.stringify({ name: `probe-${n.name}`, hops: [{ name: "hop-0", nodes: [n] }] }) });
+    await gost("/config/services", {
+      method: "POST",
+      body: JSON.stringify({ name: `probe-${n.name}`, addr: `:${PROBE_PORT + i}`, handler: { type: "http", chain: `probe-${n.name}` }, listener: { type: "tcp" } }),
+    });
+  }
+}
+
+// Куда ходят агенты: Codex по подписке — chatgpt.com, по ключу — api.openai.com, NeuralDeep — api.neuraldeep.ru.
+export const ENDPOINTS = [
+  { id: "chatgpt", host: "chatgpt.com", path: "/backend-api/codex/responses" },
+  { id: "openai", host: "api.openai.com", path: "/v1/models" },
+  { id: "neuraldeep", host: "api.neuraldeep.ru", path: "/v1/models" },
+] as const;
+export type Probe = { ms: number | null; status: number | null; state: "ok" | "blocked" | "dead" };
+
+// Без ключа любой из этих API отвечает 401/404/405 — значит, дошли. 403 — блок по региону, ошибка соединения — прокси мёртв.
+async function probe(port: number, host: string, path: string): Promise<Probe> {
+  const started = Date.now();
+  try {
+    const r = await viaEgress(host, path, {}, port, 10000);
+    return { ms: Date.now() - started, status: r.status, state: r.status === 403 ? "blocked" : "ok" };
+  } catch {
+    return { ms: null, status: null, state: "dead" };
+  }
+}
+
+export type NetReport = {
+  checkedAt: number;
+  chain: Record<string, Probe>;
+  proxies: { name: string; results: Record<string, Probe> }[];
+  exit: { country: string | null; org: string | null; ms: number } | null;
+};
+let netCache: { at: number; report: Promise<NetReport> } | null = null;
+export function netReport(force = false): Promise<NetReport> {
+  if (!force && netCache && Date.now() - netCache.at < 60_000) return netCache.report;
+  const report = (async () => {
+    const nodes: any[] = (await readChain()).hops?.[0]?.nodes ?? [];
+    const cfg = (await gost("/config")).data ?? (await gost("/config"));
+    if ((cfg.services ?? []).filter((x: any) => x.name.startsWith("probe-")).length !== nodes.length) await syncProbes(nodes);
+    const row = async (port: number) => Object.fromEntries(await Promise.all(ENDPOINTS.map(async (e) => [e.id, await probe(port, e.host, e.path)] as const)));
+    const [chain, proxies, exit] = await Promise.all([
+      row(8080),
+      Promise.all(nodes.map(async (n, i) => ({ name: n.name as string, results: await row(PROBE_PORT + i) }))),
+      checkExit().then(({ country, org, ms }) => ({ country, org, ms })).catch(() => null),
+    ]);
+    return { checkedAt: Date.now(), chain, proxies, exit };
+  })();
+  netCache = { at: Date.now(), report };
+  report.catch(() => (netCache = null));
+  return report;
+}
+
 // HTTPS-запрос наружу через egress:8080 (CONNECT): у морды нет прямого выхода в интернет.
-export function viaEgress(host: string, path: string, headers: Record<string, string> = {}): Promise<{ status: number; body: string }> {
+export function viaEgress(host: string, path: string, headers: Record<string, string> = {}, port = 8080, timeoutMs = 15000): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("таймаут 15 с")), 15000);
-    const req = httpRequest({ host: "egress", port: 8080, method: "CONNECT", path: `${host}:443` });
+    const timer = setTimeout(() => { req.destroy(); reject(new Error(`таймаут ${timeoutMs / 1000} с`)); }, timeoutMs);
+    const req = httpRequest({ host: "egress", port, method: "CONNECT", path: `${host}:443` });
     req.on("connect", (res, socket) => {
-      if (res.statusCode !== 200) return reject(new Error(`egress ответил ${res.statusCode}`));
+      if (res.statusCode !== 200) { clearTimeout(timer); return reject(new Error(`egress ответил ${res.statusCode}`)); }
       const tls = tlsConnect({ socket, servername: host }, () => {
         const extra = Object.entries(headers).map(([k, v]) => `${k}: ${v}\r\n`).join("");
         // HTTP/1.0 — ответ без chunked, читаем до закрытия соединения
@@ -93,9 +157,9 @@ export function viaEgress(host: string, path: string, headers: Record<string, st
         const status = Number(raw.slice(9, 12));
         resolve({ status, body: raw.slice(raw.indexOf("\r\n\r\n") + 4) });
       });
-      tls.on("error", reject);
+      tls.on("error", (e) => { clearTimeout(timer); reject(e); });
     });
-    req.on("error", reject);
+    req.on("error", (e) => { clearTimeout(timer); reject(e); });
     req.end();
   });
 }

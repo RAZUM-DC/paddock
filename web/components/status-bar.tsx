@@ -2,6 +2,7 @@
 // модель │ папка (ветка) │ заполненность контекста │ кеш │ недельный лимит.
 import type { ReactNode } from "react";
 import { fmtTokens, fmtUntil, fmtWindow } from "@/lib/format";
+import { t, locale } from "@/lib/i18n";
 
 export type TokenUsage = {
   total: { totalTokens: number; inputTokens: number; cachedInputTokens: number; outputTokens: number };
@@ -47,7 +48,7 @@ export function StatusBar({ model, effort, cwd, branch, usage, limits, connected
       {usage && (
         <>
           <Sep />
-          <span className="flex items-center gap-1.5" title={`в контексте ${used.toLocaleString("ru")} токенов${window ? ` из ${window.toLocaleString("ru")}` : ""}`}>
+          <span className="flex items-center gap-1.5" title={window ? t("в контексте {used} токенов из {total}", { used: used.toLocaleString(locale()), total: window.toLocaleString(locale()) }) : t("в контексте {used} токенов", { used: used.toLocaleString(locale()) })}>
             {window && (
               <span className="relative h-2 w-14 overflow-hidden rounded-sm bg-[var(--panel-2)]">
                 <span className="absolute inset-y-0 left-0 rounded-sm bg-[repeating-linear-gradient(90deg,var(--pink)_0_3px,transparent_3px_4px)]" style={{ width: `${pct}%` }} />
@@ -61,7 +62,7 @@ export function StatusBar({ model, effort, cwd, branch, usage, limits, connected
           {cache !== null && (
             <>
               <Sep />
-              <span title="доля входа, взятая из кеша, в последнем запросе">
+              <span title={t("доля входа, взятая из кеша, в последнем запросе")}>
                 cache <span className="text-[var(--green)]">{cache}%</span>{" "}
                 <span className="text-[var(--green)]">↓{fmtTokens(usage.last.cachedInputTokens)}</span>{" "}
                 <span className="text-[var(--yellow)]">+{fmtTokens(usage.last.outputTokens)}</span>
@@ -73,7 +74,7 @@ export function StatusBar({ model, effort, cwd, branch, usage, limits, connected
       {limits?.primary && (
         <>
           <Sep />
-          <span title="лимит подписки ChatGPT">
+          <span title={t("лимит подписки ChatGPT")}>
             {fmtWindow(limits.primary.windowDurationMins)}:<span className="text-[var(--pink)]">{Math.round(limits.primary.usedPercent)}%</span>
             {limits.primary.resetsAt && <span className="text-[var(--faint)]">({fmtUntil(limits.primary.resetsAt)})</span>}
           </span>

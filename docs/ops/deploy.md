@@ -24,7 +24,7 @@ mkdir -p secrets/egress secrets/tokens && chmod 700 secrets
 #   ADMIN_USERS=<имя>
 ./add-user.sh <имя> --admin
 docker compose up -d --build
-docker compose exec web npm run create-user -- <имя>@hub.local '<пароль 12+>'
+docker compose exec -w /build/current web npm run create-user -- <имя>@hub.local '<пароль 12+>'
 ```
 
 Дальше вход в ChatGPT — из морды: Настройки → Аккаунт ChatGPT → «Получить код».

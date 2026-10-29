@@ -4,6 +4,7 @@
 // Тратит одну генерацию NeuralDeep. Создаёт чат «Нарисуй логотип Paddock…» (оставляет как пример).
 import puppeteer from "puppeteer-core";
 import { mkdirSync } from "node:fs";
+const LANG = process.env.HUB_LANG ?? "ru";
 
 const URL_ = process.env.HUB_URL ?? "http://localhost:8088";
 const out = (process.argv[2] ?? "/tmp/paddock-screens").replace(/\/$/, "") + "/";
@@ -34,7 +35,13 @@ const clickText = (sel, t) => page.evaluate((s, t) => { const el = [...document.
 const hidePrivate = () => page.evaluate(() => document.querySelectorAll("nav .group\\/t").forEach((r) => { if (/тупой/i.test(r.innerText)) r.style.display = "none"; }));
 
 await page.goto(`${URL_}/login`, { waitUntil: "networkidle0" });
-await page.evaluate(() => localStorage.clear());
+await page.evaluate((lang, sel) => {
+  localStorage.clear();
+  // Язык интерфейса явно: тесты ищут подписи; модель — для тестового пользователя без ChatGPT (HUB_SELECTION='{"model":"qwen3.8-27b","provider":"neuraldeep","effort":""}').
+  localStorage.setItem("paddock.lang", JSON.stringify(lang));
+  if (sel) localStorage.setItem("paddock.selection", sel);
+}, LANG, process.env.HUB_SELECTION ?? null);
+await page.reload({ waitUntil: "networkidle0" });
 await page.type("input[name=email]", process.env.HUB_EMAIL ?? "valera@hub.local");
 await page.type("input[name=password]", process.env.HUB_PASS);
 await Promise.all([page.waitForNavigation({ waitUntil: "networkidle0" }), page.click("button")]);

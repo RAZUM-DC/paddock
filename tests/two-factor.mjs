@@ -34,6 +34,8 @@ const openWebTab = async () => {
 };
 const login = async () => {
   await page.goto(`${URL_}/login`, { waitUntil: "networkidle0" });
+  await page.evaluate(() => localStorage.setItem("paddock.lang", JSON.stringify("ru")));
+  await page.reload({ waitUntil: "networkidle0" });
   await page.type("input[name=email]", EMAIL);
   await page.type("input[name=password]", PASS);
   await page.click("button");

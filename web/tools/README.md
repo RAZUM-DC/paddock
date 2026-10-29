@@ -1,19 +1,27 @@
-# Инструменты Paddock
+# Paddock tools
 
-Реестр CLI-инструментов и скиллов, которые морда ставит в харнесс пользователя. Не зависит от харнесса:
-инструмент — это команда (shell есть у любого агента) плюс скилл, который объясняет агенту, когда её звать.
+Tools and skills that Paddock installs into a user's harness. They do not depend on the harness:
+a tool is a command (every agent has a shell) plus a skill that tells the agent when to call it.
 
-Папка на инструмент:
+One folder per tool:
 
-| файл | что |
+| file | what |
 |---|---|
-| `tool.json` | `id`, `name`, `description`, `bin` (файл команды), `skill` (имя скилла), `needs` (какой ключ нужен) |
-| `<bin>` | сама команда, без зависимостей (node) |
-| `SKILL.md` | скилл; `{{BIN}}` при установке заменяется на путь команды в харнессе |
+| `tool.json` | `id`, `name` and `description` (a string or `{ "en": …, "ru": … }`), `bin` (the command file), `skill` (skill name), `needs` (which key it requires, e.g. `neuraldeep`) |
+| `<bin>` | the command itself, no dependencies (node) |
+| `SKILL.md` | the skill; `{{BIN}}` is replaced with the command's path inside the harness on install |
 
-Установка (вкладка «Инструменты» в настройках): команда → `<дом харнесса>/paddock/tools/<id>/<bin>`,
-скилл → `<дом харнесса>/skills/<skill>/SKILL.md`, настройки инструмента → `<дом харнесса>/paddock/tools/<id>/settings.json`.
+Install (Settings → Tools): command → `<harness home>/paddock/tools/<id>/<bin>`,
+skill → `<harness home>/skills/<skill>/SKILL.md`, tool settings → `<harness home>/paddock/tools/<id>/settings.json`.
+If the command or the skill in the registry changes, the tool shows **update available**.
 
-| инструмент | что |
+Rules that keep tools working everywhere:
+
+- Talk to the outside world only through the proxy (`HTTPS_PROXY`, default `http://egress:8080`): harnesses have no direct internet.
+- Read keys from the harness config or env yourself; never ask the model to pass a key, so it never lands in the transcript.
+- Print `saved: <absolute path>` for every file you produce; Paddock turns images into thumbnails.
+- Keep the skill short: when to call, the exact command, what to show the user, what to do on error.
+
+| tool | what |
 |---|---|
-| [images](images/) | генерация и правка картинок, NeuralDeep |
+| [images](images/) | image generation and editing, NeuralDeep |

@@ -3,6 +3,7 @@
 // Нужны puppeteer-core и Chrome (CHROME=путь, по умолчанию macOS). Создаёт 1–2 коротких треда в истории.
 import puppeteer from "puppeteer-core";
 import { mkdirSync } from "node:fs";
+const LANG = process.env.HUB_LANG ?? "ru";
 
 const URL_ = process.env.HUB_URL ?? "http://localhost:8088";
 const out = (process.argv[2] ?? "/tmp/ui-tour").replace(/\/$/, "") + "/";
@@ -39,7 +40,13 @@ async function step(name, fn) {
 
 await step("вход: неверный пароль — понятная ошибка", async () => {
   await page.goto(`${URL_}/login`, { waitUntil: "networkidle0" });
-  await page.evaluate(() => localStorage.clear());
+  await page.evaluate((lang, sel) => {
+    localStorage.clear();
+    // Язык интерфейса явно: тесты ищут подписи; модель — для тестового пользователя без ChatGPT (HUB_SELECTION='{"model":"qwen3.8-27b","provider":"neuraldeep","effort":""}').
+    localStorage.setItem("paddock.lang", JSON.stringify(lang));
+    if (sel) localStorage.setItem("paddock.selection", sel);
+  }, LANG, process.env.HUB_SELECTION ?? null);
+  await page.reload({ waitUntil: "networkidle0" });
   await page.type("input[name=email]", process.env.HUB_EMAIL ?? "valera@hub.local");
   await page.type("input[name=password]", "wrong-password-123");
   await page.click("button");
@@ -98,6 +105,8 @@ await step("старый тред с инструментами: карточк�
 });
 
 await step("лимиты: панель с расходом", async () => {
+  // У пользователя без входа в ChatGPT (тестовый, только NeuralDeep) лимитов нет — шаг не про него.
+  if ((await text()).includes("нет данных")) return true;
   await clickText("aside button", "Лимиты Codex");
   await page.waitForFunction(() => document.body.innerText.includes("всего"), { timeout: 20000 });
   await shot("account");
@@ -123,13 +132,26 @@ for (const t of ["Аккаунт ChatGPT", "NeuralDeep", "Codex", "Прокси"
 }
 await page.keyboard.press("Escape");
 
-await step("панель файлов открывается и закрывается", async () => {
-  await page.click('[title^="Созданные и изменённые"]');
+await step("правая панель: файлы, действия, сеть, сессии", async () => {
+  await page.click("[data-side-toggle]");
   await sleep(400);
+  await page.click('[data-side-tab="files"]');
+  await sleep(300);
   await shot("files");
-  const open = (await text()).includes("Файлы ·");
-  await page.click('[title="Закрыть"]');
-  return open;
+  const files = /Файлы · \d+/.test(await text());
+  await page.click('[data-side-tab="actions"]');
+  await sleep(300);
+  const actions = /действий \d+/.test(await text());
+  await page.click('[data-side-tab="net"]');
+  await page.waitForFunction(() => /цепочка/.test(document.body.innerText), { timeout: 60000 });
+  await shot("network");
+  const net = !/цепочка\s+dead\s+dead\s+dead/.test(await text());
+  await page.click('[data-side-tab="sessions"]');
+  await sleep(500);
+  const sessions = (await text()).includes("Снимки раскладок") || /снимки раскладок/i.test(await text());
+  await page.click('[data-side-tab="files"]');
+  await page.click("[data-side-toggle]");
+  return files && actions && net && sessions;
 });
 
 await step("раскладка 4: поля ввода на одной высоте в каждом ряду", async () => {

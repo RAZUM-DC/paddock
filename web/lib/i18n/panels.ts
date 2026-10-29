@@ -1,0 +1,106 @@
+// Переводы RU→EN: ключ — русская строка как в коде (с {подстановками}), значение — английская.
+const en: Record<string, string> = {
+  // side-panel
+  "Файлы": "Files",
+  "Действия": "Actions",
+  "Сеть": "Network",
+  "Сессии": "Sessions",
+  "Закрыть": "Close",
+  "Новый чат": "New chat",
+  "работает": "working",
+  "ждёт разрешения": "waiting for approval",
+  "готов": "done",
+  "пусто": "empty",
+  "действий {n}": "{n} actions",
+  "упало {n}": "{n} failed",
+  "Агент в этом чате пока ничего не запускал.": "The agent hasn't run anything in this chat yet.",
+  "(без вывода)": "(no output)",
+  "403: доступ закрыт по региону": "403: blocked in this region",
+  "Сеть агентов": "Agent network",
+  "Проверить сейчас": "Check now",
+  "проверяю каждый прокси…": "checking each proxy…",
+  "агенты → egress →": "agents → egress →",
+  "прокси": "proxy",
+  "Цепочка с failover: так ходят агенты": "Failover chain: this is how agents connect",
+  "цепочка": "chain",
+  "Проверено в {time} с сервера, раз в минуту.": "Checked at {time} from the server, every minute.",
+  "401/404 без ключа = API доступен; 403 — блок по региону; dead — прокси не отвечает. Порядок и адреса прокси — Настройки → Прокси (админ).":
+    "401/404 without a key = API reachable; 403 = region block; dead = proxy not responding. Proxy order and addresses: Settings → Proxy (admin).",
+  "снимок {date}": "snapshot {date}",
+  "Окна": "Panes",
+  "Снимки раскладок": "Layout snapshots",
+  "название, например «релиз»": "name, e.g. “release”",
+  "Сохранить": "Save",
+  "Снимок запоминает, сколько окон, какие чаты в них и где границы. Восстановить — одним кликом, на любом устройстве.":
+    "A layout snapshot remembers how many panes you have, which chats are in them and where the splits are. Restore it in one click, on any device.",
+  "Восстановить": "Restore",
+  "Удалить": "Delete",
+
+  // tools
+  "Инструмент Paddock — это команда и скилл, который объясняет агенту, когда её звать. Shell есть у любого харнесса и любой модели, поэтому инструменты не зависят ни от Codex, ни от провайдера.":
+    "A Paddock tool is a command plus a skill that tells the agent when to call it. Every harness and every model has a shell, so tools don't depend on Codex or on the provider.",
+  "Инструменты Paddock": "Paddock tools",
+  "читаю реестр…": "reading registry…",
+  "Скиллы в харнессе": "Skills in the harness",
+  "Перечитать с диска": "Reload from disk",
+  "читаю скиллы…": "reading skills…",
+  "скиллов нет": "no skills",
+  "Скиллы проекта (папка": "Project skills (the",
+  "в репо) видны в окне чата этого проекта, значок под полем ввода.": "folder in the repo) show up in that project's chat pane, via the badge under the input.",
+  "Свой": "Personal",
+  "Проект": "Project",
+  "Системный": "System",
+  "Админ": "Admin",
+  "свой": "personal",
+  "проект": "project",
+  "системный": "system",
+  "админ": "admin",
+  "Включить / выключить всю группу": "Enable / disable the whole group",
+  "сначала подключи ключ во вкладке NeuralDeep": "connect a key in the NeuralDeep tab first",
+  "Готово, действует для новых ходов": "Done, applies to new turns",
+  "Выключено": "Disabled",
+  "не получилось": "failed",
+  "есть обновление": "update available",
+  "установлен": "installed",
+  "выключен": "off",
+  "ключ NeuralDeep не подключён — вкладка NeuralDeep": "NeuralDeep key not connected — see the NeuralDeep tab",
+  "Пропорции по умолчанию": "Default aspect ratio",
+  "Разрешить правку картинок": "Allow image editing",
+  "Обновить": "Update",
+  "Применить": "Apply",
+  "Скиллы и инструменты этого чата": "Skills and tools in this chat",
+  "нет — включаются в Настройки → Инструменты": "none — enable them in Settings → Tools",
+  "Скиллы": "Skills",
+  "● — использован в этом чате": "● — used in this chat",
+
+  // files-panel
+  "создан": "added",
+  "изменён": "modified",
+  "удалён": "deleted",
+  "К списку": "Back to list",
+  "Файлы · {n}": "Files · {n}",
+  "Дифф": "Diff",
+  "Файл": "File",
+  "Codex пока не менял файлы в этом чате.": "Codex hasn't changed any files in this chat yet.",
+  "Здесь правки через apply_patch. Файлы, записанные shell-командами, сюда не попадают.":
+    "Shows edits made via apply_patch. Files written by shell commands don't appear here.",
+  "(дифф пуст)": "(empty diff)",
+  "Файл удалён.": "File deleted.",
+  "читаю…": "reading…",
+
+  // status-bar
+  "в контексте {used} токенов из {total}": "{used} of {total} tokens in context",
+  "в контексте {used} токенов": "{used} tokens in context",
+  "доля входа, взятая из кеша, в последнем запросе": "share of input served from cache in the last request",
+  "лимит подписки ChatGPT": "ChatGPT subscription limit",
+
+  // model-picker
+  "Модель": "Model",
+  "Усилие рассуждения": "Reasoning effort",
+
+  // markdown
+  "скопировано": "copied",
+  "копировать": "copy",
+};
+
+export default en;

@@ -1,0 +1,95 @@
+// Переводы RU→EN: ключ — русская строка как в коде (с {подстановками}), значение — английская.
+// Область: чат, окна, сайдбар, сообщения, вход, форматирование времени.
+const en: Record<string, string> = {
+  // lib/format.ts
+  "{n} мс": "{n} ms",
+  "{n} с": "{n} s",
+  "{m} мин {s} с": "{m} min {s} s",
+  "Сегодня": "Today",
+  "Вчера": "Yesterday",
+  "На этой неделе": "This week",
+  "В этом месяце": "This month",
+  "Раньше": "Earlier",
+
+  // lib/messages.ts
+  "в {path}": "in {path}",
+  "{pattern} в {url}": "{pattern} in {url}",
+  "Контекст сжат": "Context compacted",
+  "ошибка хода": "turn failed",
+
+  // components/pane.tsx
+  "ошибка": "error",
+  "Что делаем?": "What should we do?",
+  "Нет связи с codex…": "No connection to codex…",
+  "Рабочая папка Codex": "Codex working folder",
+  "Остановить": "Stop",
+  "Перетащи, чтобы поменять окна местами": "Drag to swap panes",
+  "работает": "working",
+  "готов": "done",
+  "Новый чат": "New chat",
+  "Закрыть окно": "Close pane",
+  "Чем займёмся?": "What are we building?",
+
+  // components/chat.tsx
+  "без названия": "untitled",
+  "ошибка {status}": "error {status}",
+  "{k}k контекста": "{k}k context",
+  " · без рассуждений": " · no reasoning",
+  "(файл больше 512 КБ, не показываю)": "(file is larger than 512 KB, not shown)",
+  "Вышла новая версия — обновить": "New version available — reload",
+  "Сколько чатов на экране": "Chats on screen",
+  "Панель: файлы, действия агента, сеть, сессии": "Panel: files, agent actions, network, sessions",
+  "Панель": "Panel",
+  "Агент ждёт разрешения": "Agent is waiting for approval",
+  "Тяни, чтобы изменить ширину; двойной клик — поровну": "Drag to resize width; double-click to split evenly",
+  "Тяни, чтобы изменить высоту; двойной клик — поровну": "Drag to resize height; double-click to split evenly",
+
+  // components/messages.tsx
+  "Изменить и переотправить": "Edit and resend",
+  "Копировать": "Copy",
+  "История после этого сообщения будет отброшена": "History after this message will be discarded",
+  "Отмена": "Cancel",
+  "Отправить": "Send",
+  "время до первого токена: от отправки до начала ответа модели": "time to first token: from sending to the start of the model's reply",
+  "{n} выходных токенов за {time} без учёта инструментов": "{n} output tokens in {time}, excluding tools",
+  "Копировать ответ": "Copy reply",
+  "Ответить заново": "Regenerate",
+  "{n} рез.": "{n} results",
+  "(пусто)": "(empty)",
+  "ничего не нашлось": "nothing found",
+  "Codex просит разрешения": "Codex is asking for permission",
+  "Разрешить": "Allow",
+  "На всю сессию": "For this session",
+  "Отказать": "Deny",
+  "Тип запроса «{method}» морда пока не умеет — Codex может доделать её сам.": "The UI doesn't support “{method}” requests yet — Codex can add it itself.",
+  "Вопрос от инструмента": "Question from tool",
+
+  // components/sidebar.tsx
+  "Поиск по чатам…": "Search chats…",
+  "открыт в окне": "open in a pane",
+  "В архив": "Archive",
+  "Пока пусто": "Nothing here yet",
+  "Настройки": "Settings",
+  "Язык интерфейса": "Interface language",
+  "Выйти": "Log out",
+  "буквы, цифры, пробел, . _ -": "letters, digits, space, . _ -",
+  "не получилось": "failed",
+  "Новый чат в папке": "New chat in folder",
+  "читаю папки…": "loading folders…",
+  "новая папка": "new folder",
+  "создать": "create",
+
+  // app/login/page.tsx
+  "Слишком много попыток, подожди минуту": "Too many attempts, wait a minute",
+  "Код не подошёл": "Invalid code",
+  "Неверная почта или пароль": "Wrong email or password",
+  "Не получилось войти": "Couldn't sign in",
+  "Код из приложения-аутентификатора (Authy) или резервный код.": "Code from your authenticator app (Authy) or a backup code.",
+  "email": "email",
+  "пароль": "password",
+  "Запомнить этот браузер на 30 дней": "Remember this browser for 30 days",
+  "Подтвердить": "Verify",
+  "Войти": "Sign in",
+};
+
+export default en;

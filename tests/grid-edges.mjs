@@ -1,6 +1,7 @@
 // Крайние случаи сетки окон: границы, перетаскивание, раскладки, перезагрузка, горячие клавиши, узкое окно.
 import puppeteer from "puppeteer-core";
 import { readFileSync } from "node:fs";
+const LANG = process.env.HUB_LANG ?? "ru";
 const dir = new URL(".", import.meta.url).pathname;
 // Запуск: HUB_URL=http://localhost:8088 HUB_EMAIL=valera@hub.local HUB_PASS=... node tests/grid-edges.mjs (нужен puppeteer-core и Chrome)
 const pass = process.env.HUB_PASS;
@@ -16,7 +17,13 @@ const paneRect = (i) => rect(`[data-pane="${i}"]`);
 const drag = async (x1, y1, x2, y2) => { await page.mouse.move(x1, y1); await page.mouse.down(); await page.mouse.move((x1 + x2) / 2, (y1 + y2) / 2, { steps: 5 }); await page.mouse.move(x2, y2, { steps: 5 }); await page.mouse.up(); await sleep(300); };
 
 await page.goto(`${process.env.HUB_URL ?? "http://localhost:8088"}/login`, { waitUntil: "networkidle0" });
-await page.evaluate(() => localStorage.clear());
+await page.evaluate((lang, sel) => {
+  localStorage.clear();
+  // Язык интерфейса явно: тесты ищут подписи; модель — для тестового пользователя без ChatGPT (HUB_SELECTION='{"model":"qwen3.8-27b","provider":"neuraldeep","effort":""}').
+  localStorage.setItem("paddock.lang", JSON.stringify(lang));
+  if (sel) localStorage.setItem("paddock.selection", sel);
+}, LANG, process.env.HUB_SELECTION ?? null);
+await page.reload({ waitUntil: "networkidle0" });
 await page.type("input[name=email]", process.env.HUB_EMAIL ?? "valera@hub.local");
 await page.type("input[name=password]", pass);
 await Promise.all([page.waitForNavigation({ waitUntil: "networkidle0" }), page.click("button")]);

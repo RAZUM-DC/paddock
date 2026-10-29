@@ -13,7 +13,7 @@ node {{BIN}} edit --images /abs/a.png,/abs/b.png --prompt "what to change" --sav
 ```
 
 - Aspect: `1:1`, `4:3`, `3:4`, `16:9`, `9:16` (default comes from Paddock settings).
-- It takes 10–60 s and prints `saved: /path.png` for each image. Run one generation at a time.
+- It takes 10–60 s and prints a `saved: <absolute path>` line for each image. Run one generation at a time.
 - The prompt can be in any language.
 - User attachments are in `<working dir>/.paddock/uploads/`.
 - `edit` works only if editing is enabled in Paddock settings; if the command says it is off, tell the user.

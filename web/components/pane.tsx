@@ -11,7 +11,8 @@ import {
   type AppendMessage,
 } from "@assistant-ui/react";
 import type { ServerRequest } from "@/lib/codex-client";
-import { changedFiles, itemToPart, toThreadMessage, turnsToMessages, userText, type ChangedFile, type Msg, type Part, type TurnMeta } from "@/lib/messages";
+import { actionsOf, changedFiles, itemToPart, toThreadMessage, turnsToMessages, userText, type Action, type ChangedFile, type Msg, type Part, type TurnMeta } from "@/lib/messages";
+import { t } from "@/lib/i18n";
 import { store } from "@/lib/store";
 import { Icon } from "./icons";
 import { ImageReader, makeReader } from "./local-image";
@@ -29,7 +30,8 @@ export type PaneHandle = {
   serverRequest: (req: ServerRequest) => void;
   reconnected: () => void;
 };
-export type PaneState = { threadId: string | null; running: boolean; files: ChangedFile[]; cwd: string | null };
+// waiting — агент ждёт разрешения (как blocked в herdr); actions — лента для правой панели.
+export type PaneState = { threadId: string | null; running: boolean; waiting: boolean; files: ChangedFile[]; actions: Action[]; cwd: string | null; model: string | null };
 
 type Api = {
   request: (method: string, params: unknown) => Promise<any>;
@@ -105,6 +107,12 @@ export const Pane = memo(function Pane({ handleRef, api, connected, models, ndMo
   const files = useMemo(() => changedFiles(messages), [messages]);
   // Наверх сообщаем только когда список файлов реально поменялся, а не на каждый кусок стрима.
   const filesKey = files.map((f) => `${f.path}:${f.edits}:${f.kind}`).join("|");
+  // Когда действие появилось вживую — для времени в ленте; у истории времени нет (Codex его не хранит).
+  const seen = useRef<Record<string, number>>({});
+  const actions = useMemo(() => actionsOf(messages, seen.current), [messages]);
+  const actionsRef = useRef(actions);
+  actionsRef.current = actions;
+  const actionsKey = actions.map((a) => `${a.id}:${a.ok}`).join("|");
   const filesRef = useRef(files);
   filesRef.current = files;
 
@@ -188,6 +196,7 @@ export const Pane = memo(function Pane({ handleRef, api, connected, models, ndMo
           break;
         }
         firstToken(p.turnId);
+        if (method === "item/started") seen.current[p.item.id] ??= Date.now();
         const part = itemToPart(p.item);
         if (part) updatePart(p.turnId, p.item.id, () => part);
         break;
@@ -217,11 +226,11 @@ export const Pane = memo(function Pane({ handleRef, api, connected, models, ndMo
         setTurnId((t) => (t === p.turn.id ? null : t));
         setMessages((ms) => ms.map((m) => (m.id === `a-${p.turn.id}` ? { ...m, running: false } : m)));
         patchMeta(p.turn.id, { durationMs: p.turn.durationMs });
-        if (p.turn.error) updatePart(p.turn.id, `err-${p.turn.id}`, () => ({ type: "text", itemId: `err-${p.turn.id}`, text: `⚠️ ${p.turn.error.message ?? "ошибка хода"}` }));
+        if (p.turn.error) updatePart(p.turn.id, `err-${p.turn.id}`, () => ({ type: "text", itemId: `err-${p.turn.id}`, text: `⚠️ ${p.turn.error.message ?? t("ошибка хода")}` }));
         onThreadsChanged();
         break;
       case "error":
-        if (!p.willRetry) updatePart(p.turnId, `err-${p.turnId}`, () => ({ type: "text", itemId: `err-${p.turnId}`, text: `⚠️ ${p.error?.message ?? "ошибка"}` }));
+        if (!p.willRetry) updatePart(p.turnId, `err-${p.turnId}`, () => ({ type: "text", itemId: `err-${p.turnId}`, text: `⚠️ ${p.error?.message ?? t("ошибка")}` }));
         break;
     }
   }, [ensureTurn, updatePart, patchMeta, firstToken, onThreadsChanged]);
@@ -274,8 +283,8 @@ export const Pane = memo(function Pane({ handleRef, api, connected, models, ndMo
   }, [command, connected, openThread, newThread]);
 
   useEffect(() => {
-    onState({ threadId, running: turnId !== null, files: filesRef.current, cwd: ctx.cwd });
-  }, [threadId, turnId, filesKey, ctx.cwd, onState]);
+    onState({ threadId, running: turnId !== null, waiting: approvals.length > 0, files: filesRef.current, actions: actionsRef.current, cwd: ctx.cwd, model: selRef.current?.model ?? null });
+  }, [threadId, turnId, approvals.length, filesKey, actionsKey, ctx.cwd, onState]);
 
   const startTurn = async (text: string) => {
     // Пузырь сообщения сразу, не дожидаясь thread/start и turn/start (в новом чате это секунды); ensureTurn заменит его настоящим.
@@ -370,11 +379,11 @@ export const Pane = memo(function Pane({ handleRef, api, connected, models, ndMo
       <ComposerPrimitive.Root className="composer rounded-2xl border border-[var(--border)] bg-[var(--panel)] p-2 transition-colors focus-within:border-[var(--accent)]/40">
         <ComposerPrimitive.Input
           autoFocus={active}
-          placeholder={connected ? "Что делаем?" : "Нет связи с codex…"}
+          placeholder={connected ? t("Что делаем?") : t("Нет связи с codex…")}
           className={`${compact ? "max-h-40 min-h-9" : "max-h-60 min-h-11"} w-full resize-none bg-transparent px-2.5 py-2 leading-relaxed outline-none placeholder:text-[var(--faint)]`}
         />
         <div className="flex items-center gap-2 px-1">
-          <span className="flex min-w-0 items-center gap-1.5 truncate rounded-lg border border-[var(--border)] px-2.5 py-1 font-mono text-xs text-[var(--muted)]" title="Рабочая папка Codex">
+          <span className="flex min-w-0 items-center gap-1.5 truncate rounded-lg border border-[var(--border)] px-2.5 py-1 font-mono text-xs text-[var(--muted)]" title={t("Рабочая папка Codex")}>
             <Icon name="folder" size={13} className="shrink-0 text-[var(--blue)]" />
             <span className="truncate">{ctx.cwd ?? CWD}</span>
             {ctx.branch && (
@@ -391,7 +400,7 @@ export const Pane = memo(function Pane({ handleRef, api, connected, models, ndMo
             </ComposerPrimitive.Send>
           </ThreadPrimitive.If>
           <ThreadPrimitive.If running>
-            <ComposerPrimitive.Cancel className="grid h-9 w-9 shrink-0 place-items-center rounded-full border border-[var(--accent)]/50 text-[var(--accent)]" title="Остановить">
+            <ComposerPrimitive.Cancel className="grid h-9 w-9 shrink-0 place-items-center rounded-full border border-[var(--accent)]/50 text-[var(--accent)]" title={t("Остановить")}>
               <Icon name="stop" size={14} fill="currentColor" />
             </ComposerPrimitive.Cancel>
           </ThreadPrimitive.If>
@@ -409,22 +418,22 @@ export const Pane = memo(function Pane({ handleRef, api, connected, models, ndMo
         className={`flex min-h-0 min-w-0 flex-1 flex-col ${compact ? `border-t-2 ${active ? "border-[var(--accent)]" : "border-transparent"}` : ""}`}>
         <header className="flex h-12 shrink-0 items-center gap-1 border-b border-[var(--border)]/60 px-2">
           {compact && (
-            <button onPointerDown={onGrip} title="Перетащи, чтобы поменять окна местами" data-grip
+            <button onPointerDown={onGrip} title={t("Перетащи, чтобы поменять окна местами")} data-grip
               className="cursor-grab touch-none rounded-md p-1 text-[var(--faint)] hover:bg-[var(--panel)] hover:text-[var(--fg)] active:cursor-grabbing">
               <Icon name="grip" size={14} strokeWidth={3} />
             </button>
           )}
           {compact && (
             <span className="flex min-w-0 items-center gap-2 pl-1 pr-1">
-              <span title={running ? "работает" : "готов"}
+              <span title={running ? t("работает") : t("готов")}
                 className={`h-2 w-2 shrink-0 rounded-full ${running ? "animate-pulse bg-[var(--accent)] shadow-[0_0_8px_var(--accent)]" : threadId ? "bg-[var(--green)]" : "bg-[var(--faint)]"}`} />
-              <span className="max-w-[16rem] truncate text-sm text-[var(--muted)]">{title ?? "Новый чат"}</span>
+              <span className="max-w-[16rem] truncate text-sm text-[var(--muted)]">{title ?? t("Новый чат")}</span>
             </span>
           )}
           <ModelPicker models={[...models, ...ndModels]} value={shown} onChange={choose} />
           <span className="flex-1" />
           {closable && (
-            <button onClick={(e) => { e.stopPropagation(); onClose(); }} title="Закрыть окно"
+            <button onClick={(e) => { e.stopPropagation(); onClose(); }} title={t("Закрыть окно")}
               className="rounded-md p-1.5 text-[var(--faint)] hover:bg-[var(--panel)] hover:text-[var(--fg)]">
               <Icon name="plus" size={15} className="rotate-45" />
             </button>
@@ -436,13 +445,13 @@ export const Pane = memo(function Pane({ handleRef, api, connected, models, ndMo
             // В сетке поле ввода всегда внизу — чтобы в ряду окон оно стояло на одной высоте.
             <>
               <div className="glow flex flex-1 items-center justify-center px-4">
-                <h1 className="text-center text-xl font-semibold tracking-tight">Чем займёмся?</h1>
+                <h1 className="text-center text-xl font-semibold tracking-tight">{t("Чем займёмся?")}</h1>
               </div>
               <div className="w-full px-3 pb-3">{composer}</div>
             </>
           ) : empty ? (
             <div className={`glow flex flex-1 flex-col items-center justify-center px-4 ${compact ? "pb-6" : "pb-24"}`}>
-              <h1 className={`mb-5 text-center font-semibold tracking-tight ${compact ? "text-xl" : "text-2xl md:text-[28px]"}`}>Чем займёмся?</h1>
+              <h1 className={`mb-5 text-center font-semibold tracking-tight ${compact ? "text-xl" : "text-2xl md:text-[28px]"}`}>{t("Чем займёмся?")}</h1>
               <div className={`w-full ${compact ? "max-w-xl" : "max-w-3xl"}`}>{composer}</div>
             </div>
           ) : (

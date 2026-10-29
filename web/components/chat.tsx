@@ -5,9 +5,10 @@
 import { createRef, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { authClient } from "@/lib/auth-client";
 import { CodexClient, type ServerRequest } from "@/lib/codex-client";
+import { t } from "@/lib/i18n";
 import { store } from "@/lib/store";
 import type { AccountInfo, Snapshot } from "./account";
-import { FilesPanel } from "./files-panel";
+import { SidePanel, type SideTab, type SnapshotData } from "./side-panel";
 import { Icon } from "./icons";
 import type { Model, Selection } from "./model-picker";
 import { CWD, Pane, type PaneCommand, type PaneHandle, type PaneState } from "./pane";
@@ -17,7 +18,7 @@ import type { RateLimits } from "./status-bar";
 
 const PANES = 4;
 type Layout = 1 | 2 | 4;
-const emptyState: PaneState = { threadId: null, running: false, files: [], cwd: CWD };
+const emptyState: PaneState = { threadId: null, running: false, waiting: false, files: [], actions: [], cwd: CWD, model: null };
 
 // Раскладка, порядок окон и выбор модели живут в localStorage, которого нет на сервере, —
 // рисуем рабочую область только в браузере, иначе React ругается на расхождение разметки (#418).
@@ -41,6 +42,8 @@ function Workspace({ email }: { email: string }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [loginEvent, setLoginEvent] = useState<LoginEvent | null>(null);
   const [filesOpen, setFilesOpen] = useState(false);
+  const [sideTab, setSideTab] = useState<SideTab>(() => store.get<SideTab>("paddock.sideTab", "files"));
+  const chooseSideTab = useCallback((t: SideTab) => { setSideTab(t); store.set("paddock.sideTab", t); }, []);
 
   // Раскладка и какие треды открыты в окнах — переживают перезагрузку вкладки.
   type Saved = { layout: Layout; threads: (string | null)[]; slots?: number[]; col?: number; row?: number };
@@ -73,7 +76,7 @@ function Workspace({ email }: { email: string }) {
     // После thread/revert codex 0.165 отдаёт тред дважды (старое и новое превью) — оставляем первую, свежую запись.
     const seen = new Set<string>();
     const fresh = res.data.filter((t: any) => !seen.has(t.id) && seen.add(t.id));
-    setThreads(fresh.map((t: any) => ({ id: t.id, title: t.name || t.preview || "без названия", updatedAt: t.updatedAt })));
+    setThreads(fresh.map((th: any) => ({ id: th.id, title: th.name || th.preview || t("без названия"), updatedAt: th.updatedAt })));
   }, []);
 
   const loadAccount = useCallback(async () => {
@@ -103,13 +106,13 @@ function Workspace({ email }: { email: string }) {
     }
     const r = await fetch("/api/neuraldeep/models", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ key }) });
     const j = await r.json();
-    if (!r.ok) throw new Error(j.error ?? `ошибка ${r.status}`);
+    if (!r.ok) throw new Error(j.error ?? t("ошибка {status}", { status: r.status }));
     const efforts = ["low", "medium", "high"].map((e) => ({ reasoningEffort: e, description: "" }));
     setNdModels(j.models.map((m: { id: string; context: number | null; reasoning: boolean }) => ({
       id: m.id,
       model: m.id,
       displayName: m.id,
-      description: m.context ? `${Math.round(m.context / 1000)}k контекста${m.reasoning ? "" : " · без рассуждений"}` : "",
+      description: m.context ? t("{k}k контекста", { k: Math.round(m.context / 1000) }) + (m.reasoning ? "" : t(" · без рассуждений")) : "",
       isDefault: false,
       defaultReasoningEffort: m.reasoning ? "medium" : "",
       supportedReasoningEfforts: m.reasoning ? efforts : [],
@@ -251,6 +254,18 @@ function Workspace({ email }: { email: string }) {
   };
   const onGrip = useMemo(() => Array.from({ length: PANES }, (_, i) => (e: React.PointerEvent) => gripRef.current(i)(e)), []);
 
+  // Правая панель → Сессии: перейти к окну (в одиночной раскладке оно становится видимым), снимки раскладок.
+  const focusPane = (i: number) => setActivePane(i);
+  const snapshotNow = (): SnapshotData => ({ layout, threads: states.map((s) => s.threadId), slots, col, row, active: activePane });
+  const restoreSnapshot = (d: SnapshotData) => {
+    setLayout(d.layout);
+    if (d.slots?.length === PANES) setSlots(d.slots);
+    setCol(d.col ?? 0.5);
+    setRow(d.row ?? 0.5);
+    setActivePane(d.active ?? 0);
+    d.threads.forEach((t, i) => (t ? t !== states[i].threadId && command(i, { type: "open", threadId: t }) : states[i].threadId && command(i, { type: "new", cwd: CWD })));
+  };
+
   // Тред из сайдбара: если он уже открыт в каком-то окне — переходим туда, иначе открываем в активном.
   const openThread = (id: string) => {
     setSidebar(false);
@@ -308,7 +323,10 @@ function Workspace({ email }: { email: string }) {
   const seenFiles = useRef<number[]>(Array(PANES).fill(0));
   useEffect(() => {
     states.forEach((s, i) => {
-      if (i === activePane && s.running && s.files.length > seenFiles.current[i] && window.innerWidth >= 1024) setFilesOpen(true);
+      if (i === activePane && s.running && s.files.length > seenFiles.current[i] && window.innerWidth >= 1024) {
+        setFilesOpen(true);
+        setSideTab((t) => (t === "actions" ? t : "files"));
+      }
       seenFiles.current[i] = s.files.length;
     });
   }, [states, activePane]);
@@ -317,7 +335,7 @@ function Workspace({ email }: { email: string }) {
     const abs = path.startsWith("/") ? path : `${act.cwd ?? CWD}/${path}`;
     const r = await client.current!.request("fs/readFile", { path: abs });
     const bytes = Uint8Array.from(atob(r.dataBase64), (ch) => ch.charCodeAt(0));
-    if (bytes.length > 512 * 1024) return "(файл больше 512 КБ, не показываю)";
+    if (bytes.length > 512 * 1024) return t("(файл больше 512 КБ, не показываю)");
     return new TextDecoder().decode(bytes);
   }, [act.cwd]);
 
@@ -383,7 +401,7 @@ function Workspace({ email }: { email: string }) {
       <main className="relative flex min-w-0 flex-1 flex-col">
         {stale && (
           <button onClick={() => location.reload()} className="absolute left-1/2 top-14 z-20 -translate-x-1/2 rounded-full border border-[var(--accent)]/50 bg-[var(--panel)] px-4 py-1.5 text-sm shadow-xl shadow-black/40 hover:bg-[var(--panel-2)]">
-            <span className="text-[var(--accent)]">●</span> Вышла новая версия — обновить
+            <span className="text-[var(--accent)]">●</span> {t("Вышла новая версия — обновить")}
           </button>
         )}
 
@@ -394,14 +412,14 @@ function Workspace({ email }: { email: string }) {
                 <button key={i} onClick={() => setActivePane(i)} title={`Alt+${i + 1}`}
                   className={`flex max-w-[16rem] items-center gap-1.5 whitespace-nowrap rounded-md px-2 py-1 text-xs ${i === activePane ? "bg-[var(--panel)] text-[var(--fg)]" : "text-[var(--muted)] hover:bg-[var(--panel)]"}`}>
                   <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${states[i].running ? "animate-pulse bg-[var(--accent)]" : states[i].threadId ? "bg-[var(--green)]" : "bg-[var(--faint)]"}`} />
-                  <span className="truncate">{titleOf(states[i].threadId) ?? "Новый чат"}</span>
-                  <span className="font-mono text-[10px] text-[var(--faint)]">{states[i].running ? "работает" : "готов"} ⌥{i + 1}</span>
+                  <span className="truncate">{titleOf(states[i].threadId) ?? t("Новый чат")}</span>
+                  <span className="font-mono text-[10px] text-[var(--faint)]">{states[i].running ? t("работает") : t("готов")} ⌥{i + 1}</span>
                 </button>
               ))}
             </div>
           )}
           <span className="flex-1" />
-          <div className="flex items-center rounded-lg bg-[var(--panel)] p-0.5" title="Сколько чатов на экране">
+          <div className="flex items-center rounded-lg bg-[var(--panel)] p-0.5" title={t("Сколько чатов на экране")}>
             {([1, 2, 4] as const).map((l) => (
               <button key={l} onClick={() => switchLayout(l)}
                 className={`grid h-7 w-8 place-items-center rounded-md ${layout === l ? "bg-[var(--panel-2)] text-[var(--accent)]" : "text-[var(--faint)] hover:text-[var(--fg)]"}`}>
@@ -412,21 +430,23 @@ function Workspace({ email }: { email: string }) {
           <button
             onClick={() => setFilesOpen((o) => !o)}
             className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-sm hover:bg-[var(--panel)] ${filesOpen ? "bg-[var(--panel)] text-[var(--fg)]" : "text-[var(--muted)]"}`}
-            title="Созданные и изменённые файлы активного окна"
+            title={t("Панель: файлы, действия агента, сеть, сессии")}
+            data-side-toggle
           >
             <Icon name="file" size={15} className="text-[var(--teal)]" />
-            Файлы
+            {t("Панель")}
             {act.files.length > 0 && <span className="rounded-md bg-[var(--panel-2)] px-1.5 font-mono text-[11px] text-[var(--teal)]">{act.files.length}</span>}
+            {states.some((s) => s.waiting) && <span className="h-1.5 w-1.5 rounded-full bg-[var(--yellow)] shadow-[0_0_6px_var(--yellow)]" title={t("Агент ждёт разрешения")} />}
           </button>
         </div>
 
         <div ref={gridRef} className="relative grid min-h-0 flex-1" style={gridStyle}>
           {layout !== 1 && (
-            <div onPointerDown={startResize("col")} onDoubleClick={() => setCol(0.5)} data-splitter="col" title="Тяни, чтобы изменить ширину; двойной клик — поровну"
+            <div onPointerDown={startResize("col")} onDoubleClick={() => setCol(0.5)} data-splitter="col" title={t("Тяни, чтобы изменить ширину; двойной клик — поровну")}
               className="relative z-10 cursor-col-resize bg-[var(--border)]/60 hover:bg-[var(--accent)]/60" style={{ gridColumn: 2, gridRow: "1 / -1" }} />
           )}
           {layout === 4 && (
-            <div onPointerDown={startResize("row")} onDoubleClick={() => setRow(0.5)} data-splitter="row" title="Тяни, чтобы изменить высоту; двойной клик — поровну"
+            <div onPointerDown={startResize("row")} onDoubleClick={() => setRow(0.5)} data-splitter="row" title={t("Тяни, чтобы изменить высоту; двойной клик — поровну")}
               className="relative z-10 cursor-row-resize bg-[var(--border)]/60 hover:bg-[var(--accent)]/60" style={{ gridRow: 2, gridColumn: "1 / -1" }} />
           )}
           {handles.map((h, i) => {
@@ -465,11 +485,14 @@ function Workspace({ email }: { email: string }) {
       {drag && (
         <div className="pointer-events-none fixed z-50 rounded-lg border border-[var(--accent)]/60 bg-[var(--panel)] px-3 py-1.5 text-sm shadow-2xl shadow-black/60"
           style={{ left: drag.x + 12, top: drag.y + 12 }}>
-          {titleOf(states[drag.pane].threadId) ?? "Новый чат"}
+          {titleOf(states[drag.pane].threadId) ?? t("Новый чат")}
         </div>
       )}
       {settingsOpen && <Settings email={email} account={account} models={models} ndModels={ndModels} reloadNeuralDeep={loadNeuralDeep} request={request} loginEvent={loginEvent} onClose={() => setSettingsOpen(false)} />}
-      {filesOpen && <FilesPanel files={act.files} cwd={act.cwd} readFile={readFile} onClose={() => setFilesOpen(false)} />}
+      {filesOpen && (
+        <SidePanel tab={sideTab} setTab={chooseSideTab} act={act} states={states} visible={visible} activePane={activePane}
+          titleOf={titleOf} readFile={readFile} onFocusPane={focusPane} snapshotNow={snapshotNow} restore={restoreSnapshot} onClose={() => setFilesOpen(false)} />
+      )}
     </div>
   );
 }

@@ -13,5 +13,5 @@ links:
 
 1. `./add-user.sh <имя>` (или `--admin`, чтобы его агент мог править морду). Скрипт создаёт `users/<имя>.yml`, токен и дописывает compose-файл в `.env`.
 2. `docker compose up -d harness контейнера` (`codex-<имя>`).
-3. `docker compose exec web npm run create-user -- <имя>@hub.local '<пароль>'` — часть до `@` связывает пользователя морды с его контейнером.
+3. `docker compose exec -w /build/current web npm run create-user -- <имя>@hub.local '<пароль>'` — часть до `@` связывает пользователя морды с его контейнером.
 4. Пользователь входит и в Настройках подключает ChatGPT (код устройства) или API-ключ.

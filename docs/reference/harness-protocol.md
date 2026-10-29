@@ -71,6 +71,8 @@ flowchart LR
 | Hermes | агент Nous Research; нужен проверенный способ headless-управления | ⬜ проверить |
 | coddy | ❔ уточнить у Валеры, что имеется в виду | ❔ |
 | PicoClaw | лёгкий агент, модели через litellm/NeuralDeep | ⬜ |
+| pi | pi-coding-agent: минимальный терминальный агент, сессии в `~/.pi/agent/sessions` (agentbelt их уже читает) | ⬜ |
+| omp | oh-my-pi: pi с расширениями и сабагентами, сессии в `~/.omp/agent/sessions` | ⬜ |
 
 Порядок работ — roadmap 3.7: сначала вынести общий интерфейс из `pane.tsx`/`chat.tsx`
 в `lib/harness/` (адаптер codex = текущий код), потом второй харнесс (OpenCode),

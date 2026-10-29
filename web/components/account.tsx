@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { fmtTokens, fmtUntil, fmtWindow } from "@/lib/format";
 import { Icon } from "./icons";
+import { t, locale } from "@/lib/i18n";
 
 type Window = { usedPercent: number; windowDurationMins: number | null; resetsAt: number | null };
 export type Snapshot = {
@@ -24,7 +25,7 @@ type Usage = {
   dailyUsageBuckets: { startDate: string; tokens: number }[] | null;
 };
 
-const windowName = (w: Window) => (w.windowDurationMins === 10080 ? "неделя" : w.windowDurationMins === 300 ? "5 часов" : fmtWindow(w.windowDurationMins));
+const windowName = (w: Window) => (w.windowDurationMins === 10080 ? t("неделя") : w.windowDurationMins === 300 ? t("5 часов") : fmtWindow(w.windowDurationMins));
 
 // Полоса заполнения лимита; ближе к концу краснеет, и это дублируется словом, а не только цветом.
 function Meter({ w, compact }: { w: Window; compact?: boolean }) {
@@ -35,11 +36,11 @@ function Meter({ w, compact }: { w: Window; compact?: boolean }) {
       <div className="flex items-baseline justify-between gap-2 text-xs">
         <span className="text-[var(--muted)]">
           {windowName(w)}
-          {pct >= 90 && <span className="ml-1.5 text-[var(--red)]">почти исчерпан</span>}
+          {pct >= 90 && <span className="ml-1.5 text-[var(--red)]">{t("почти исчерпан")}</span>}
         </span>
         <span className="font-mono">
           <span className="text-[var(--fg)]">{Math.round(pct)}%</span>
-          {w.resetsAt && <span className="text-[var(--faint)]"> · сброс {compact ? fmtUntil(w.resetsAt) : new Date(w.resetsAt * 1000).toLocaleString("ru", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</span>}
+          {w.resetsAt && <span className="text-[var(--faint)]"> · {t("сброс")} {compact ? fmtUntil(w.resetsAt) : new Date(w.resetsAt * 1000).toLocaleString(locale(), { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</span>}
         </span>
       </div>
       <div className="h-1.5 overflow-hidden rounded-full bg-[var(--panel-2)]">
@@ -63,9 +64,9 @@ function DailyBars({ buckets }: { buckets: { startDate: string; tokens: number }
   return (
     <div>
       <div className="mb-1.5 flex items-baseline justify-between text-xs">
-        <span className="text-[var(--muted)]">Токены за 30 дней</span>
+        <span className="text-[var(--muted)]">{t("Токены за 30 дней")}</span>
         <span className="font-mono text-[var(--faint)]">
-          {h ? `${new Date(h.date).toLocaleDateString("ru", { day: "numeric", month: "short" })}: ${fmtTokens(h.tokens)}` : `пик ${fmtTokens(max)}`}
+          {h ? `${new Date(h.date).toLocaleDateString(locale(), { day: "numeric", month: "short" })}: ${fmtTokens(h.tokens)}` : t("пик {n}", { n: fmtTokens(max) })}
         </span>
       </div>
       <div className="flex h-14 items-end gap-[2px] border-b border-[var(--border)]" onMouseLeave={() => setHover(null)}>
@@ -89,6 +90,7 @@ function DailyBars({ buckets }: { buckets: { startDate: string; tokens: number }
 // a*******@example.com — почту аккаунта на экране не светим.
 export const maskEmail = (e: string) => e.replace(/^(.)(.*)(@.*)$/, (_, a, mid, dom) => a + "*".repeat(Math.max(3, mid.length)) + dom);
 
+// Русские ключи для t(): переводятся при показе.
 const outcomes: Record<string, string> = {
   reset: "Лимит сброшен",
   nothingToReset: "Сбрасывать нечего — лимит не израсходован",
@@ -126,24 +128,24 @@ export function AccountCard({ info, loadUsage, resetLimits }: {
     <div ref={ref} className="relative px-3 pb-2">
       <button onClick={() => setOpen((o) => !o)} className="w-full space-y-2 rounded-xl border border-[var(--border)] bg-[var(--panel)]/60 p-3 text-left hover:bg-[var(--panel)]">
         <div className="flex items-center justify-between text-xs">
-          <span className="font-medium text-[var(--fg)]">Лимиты Codex</span>
+          <span className="font-medium text-[var(--fg)]">{t("Лимиты Codex")}</span>
           {info.plan && <span className="rounded-md bg-gradient-to-r from-[var(--accent)] to-[var(--accent-2)] px-1.5 py-px font-mono text-[10.5px] font-semibold text-black">{info.plan}</span>}
         </div>
         {windows.map((w, i) => <Meter key={i} w={w} compact />)}
-        {windows.length === 0 && <div className="text-xs text-[var(--faint)]">нет данных</div>}
+        {windows.length === 0 && <div className="text-xs text-[var(--faint)]">{t("нет данных")}</div>}
       </button>
 
       {open && (
         <div className="absolute bottom-full left-3 right-3 z-30 mb-2 space-y-4 rounded-xl border border-[var(--border)] bg-[var(--panel)] p-4 shadow-2xl shadow-black/50 md:left-full md:right-auto md:bottom-0 md:mb-0 md:ml-2 md:w-80">
           <div>
             <div className="flex items-center justify-between">
-              <span className="text-[11px] uppercase tracking-wider text-[var(--faint)]">Аккаунт ChatGPT</span>
-              <button onClick={() => setOpen(false)} title="Закрыть" className="rounded-md p-1 text-[var(--faint)] hover:bg-[var(--panel-2)] hover:text-[var(--fg)]">
+              <span className="text-[11px] uppercase tracking-wider text-[var(--faint)]">{t("Аккаунт ChatGPT")}</span>
+              <button onClick={() => setOpen(false)} title={t("Закрыть")} className="rounded-md p-1 text-[var(--faint)] hover:bg-[var(--panel-2)] hover:text-[var(--fg)]">
                 <Icon name="plus" size={14} className="rotate-45" />
               </button>
             </div>
             <div className="mt-0.5 truncate font-mono text-[13px]">{info.email ? maskEmail(info.email) : "—"}</div>
-            <div className="text-xs text-[var(--muted)]">план <span className="font-mono text-[var(--accent)]">{info.plan ?? "—"}</span></div>
+            <div className="text-xs text-[var(--muted)]">{t("план")} <span className="font-mono text-[var(--accent)]">{info.plan ?? "—"}</span></div>
           </div>
 
           <div className="space-y-3">
@@ -154,40 +156,42 @@ export function AccountCard({ info, loadUsage, resetLimits }: {
                 {[s.primary, s.secondary].filter(Boolean).map((w, i) => <Meter key={i} w={w as Window} />)}
               </div>
             ))}
-            {main?.rateLimitReachedType && <div className="text-xs text-[var(--red)]">Лимит достигнут: {main.rateLimitReachedType}</div>}
+            {main?.rateLimitReachedType && <div className="text-xs text-[var(--red)]">{t("Лимит достигнут: {type}", { type: main.rateLimitReachedType })}</div>}
           </div>
 
           <div className="grid grid-cols-2 gap-2 text-xs">
             <div className="rounded-lg bg-[var(--panel-2)] p-2">
-              <div className="text-[var(--faint)]">Бесплатных сбросов</div>
+              <div className="text-[var(--faint)]">{t("Бесплатных сбросов")}</div>
               <div className="font-mono text-base text-[var(--fg)]">{info.resets.length}</div>
-              {info.resets[0]?.expiresAt && <div className="text-[var(--faint)]">ближний сгорает через {fmtUntil(info.resets[0].expiresAt)}</div>}
+              {info.resets[0]?.expiresAt && <div className="text-[var(--faint)]">{t("ближний сгорает через {time}", { time: fmtUntil(info.resets[0].expiresAt) })}</div>}
               {info.resets.length > 0 && !confirm && (
                 <button onClick={() => { setConfirm(true); setResetMsg(""); }} className="mt-1.5 rounded-md border border-[var(--accent)]/50 px-2 py-0.5 text-[var(--accent)] hover:bg-[var(--accent)]/10">
-                  Применить
+                  {t("Применить")}
                 </button>
               )}
             </div>
             <div className="rounded-lg bg-[var(--panel-2)] p-2">
-              <div className="text-[var(--faint)]">Кредиты</div>
+              <div className="text-[var(--faint)]">{t("Кредиты")}</div>
               <div className="font-mono text-base text-[var(--fg)]">{main?.credits?.unlimited ? "∞" : main?.credits?.balance ?? "0"}</div>
             </div>
           </div>
 
           {confirm && (
             <div className="space-y-2 rounded-lg border border-[var(--accent)]/40 bg-[var(--accent)]/[0.06] p-2.5 text-xs">
-              <div>Обнулить лимиты Codex сейчас{windows[0] ? ` (израсходовано ${Math.round(windows[0].usedPercent)}%)` : ""}? Сброс одноразовый — тратится тот, что сгорает раньше.</div>
+              <div>{windows[0]
+                ? t("Обнулить лимиты Codex сейчас (израсходовано {pct}%)? Сброс одноразовый — тратится тот, что сгорает раньше.", { pct: Math.round(windows[0].usedPercent) })
+                : t("Обнулить лимиты Codex сейчас? Сброс одноразовый — тратится тот, что сгорает раньше.")}</div>
               <div className="flex gap-1.5">
                 <button disabled={busy} onClick={async () => {
                   setBusy(true);
-                  try { setResetMsg(outcomes[await resetLimits(info.resets[0].id)] ?? "Готово"); }
-                  catch (e) { setResetMsg(e instanceof Error ? e.message : "Не получилось"); }
+                  try { setResetMsg(t(outcomes[await resetLimits(info.resets[0].id)] ?? "Готово")); }
+                  catch (e) { setResetMsg(e instanceof Error ? e.message : t("Не получилось")); }
                   setBusy(false);
                   setConfirm(false);
                 }} className="rounded-md bg-gradient-to-r from-[var(--accent)] to-[var(--accent-2)] px-2.5 py-1 font-medium text-black disabled:opacity-50">
-                  {busy ? "…" : "Сбросить"}
+                  {busy ? "…" : t("Сбросить")}
                 </button>
-                <button onClick={() => setConfirm(false)} className="rounded-md px-2.5 py-1 text-[var(--muted)] hover:bg-[var(--panel-2)]">Отмена</button>
+                <button onClick={() => setConfirm(false)} className="rounded-md px-2.5 py-1 text-[var(--muted)] hover:bg-[var(--panel-2)]">{t("Отмена")}</button>
               </div>
             </div>
           )}
@@ -198,9 +202,9 @@ export function AccountCard({ info, loadUsage, resetLimits }: {
               {usage.dailyUsageBuckets && <DailyBars buckets={usage.dailyUsageBuckets} />}
               <div className="grid grid-cols-3 gap-2 text-xs">
                 {[
-                  ["всего", usage.summary.lifetimeTokens != null ? fmtTokens(Number(usage.summary.lifetimeTokens)) : "—"],
-                  ["пик за день", usage.summary.peakDailyTokens != null ? fmtTokens(Number(usage.summary.peakDailyTokens)) : "—"],
-                  ["дней подряд", `${usage.summary.currentStreakDays ?? 0} / ${usage.summary.longestStreakDays ?? 0}`],
+                  [t("всего"), usage.summary.lifetimeTokens != null ? fmtTokens(Number(usage.summary.lifetimeTokens)) : "—"],
+                  [t("пик за день"), usage.summary.peakDailyTokens != null ? fmtTokens(Number(usage.summary.peakDailyTokens)) : "—"],
+                  [t("дней подряд"), `${usage.summary.currentStreakDays ?? 0} / ${usage.summary.longestStreakDays ?? 0}`],
                 ].map(([k, v]) => (
                   <div key={k}>
                     <div className="text-[var(--faint)]">{k}</div>
@@ -211,7 +215,7 @@ export function AccountCard({ info, loadUsage, resetLimits }: {
             </div>
           ) : (
             <div className="flex items-center gap-2 text-xs text-[var(--faint)]">
-              <Icon name="refresh" size={12} className="animate-spin" /> загружаю расход…
+              <Icon name="refresh" size={12} className="animate-spin" /> {t("загружаю расход…")}
             </div>
           )}
         </div>

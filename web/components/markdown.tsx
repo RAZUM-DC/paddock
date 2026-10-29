@@ -3,6 +3,7 @@ import { useState, type ReactNode } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
+import { t } from "@/lib/i18n";
 import { Icon } from "./icons";
 import { isLocalImage, LocalImage } from "./local-image";
 
@@ -28,7 +29,7 @@ function CodeBlock({ children }: { children?: ReactNode }) {
         <span>{lang ?? "text"}</span>
         <button onClick={copy} className="flex items-center gap-1 rounded px-1.5 py-0.5 hover:bg-[var(--panel-2)] hover:text-[var(--fg)]">
           {copied ? <Icon name="check" size={12} className="text-[var(--green)]" /> : <Icon name="copy" size={12} />}
-          {copied ? "скопировано" : "копировать"}
+          {copied ? t("скопировано") : t("копировать")}
         </button>
       </div>
       <pre>{children}</pre>

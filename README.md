@@ -15,13 +15,21 @@ Paddock does not ship its own agent. It takes a ready-made harness (today Codex 
 - **Models.** ChatGPT subscription (device-code login right from the UI) and any OpenAI-compatible provider with the Responses API, e.g. [NeuralDeep](https://neuraldeep.ru/docs).
 - **Tools, harness-agnostic.** A Paddock tool is a CLI plus a skill that tells the agent when to call it. Every harness and every model has a shell, so tools work everywhere. First one: image generation and editing (`paddock-images`).
 - **See what each chat can use.** Skills and CLIs available to the session, and which ones the agent actually used.
+- **A side panel like [agentbelt](https://github.com/vakovalskii/agentbelt).** Files the agent changed, a live action feed with filters and diffs, network health (every proxy × chatgpt.com / api.openai.com / api.neuraldeep.ru), every pane's state (working / waiting for approval / done) and layout snapshots you can restore on any device.
 - **Isolation as a product.** A container per user, `cap_drop: ALL`, no direct internet: egress only through a gost proxy chain with failover; LAN and host are closed.
 - **Login.** Password plus **2FA (TOTP)** with Authy, Google Authenticator or 1Password; trusted-browser option; backup codes.
+- **English and Russian UI**, switch in the sidebar or on the login page.
 - **Self-deploy.** An admin's agent can edit this UI and ship it; a supervisor switches the live build and rolls back a broken one.
 
-| Image generation in a chat | Tools and skills | What this chat can use |
+| Image generation in a chat | Live action feed | Network: every proxy × every agent API |
 |---|---|---|
-| ![Image generation](docs/img/paddock-image.png) | ![Settings → Tools](docs/img/settings-tools.png) | ![Session tools](docs/img/session-tools.png) |
+| ![Image generation](docs/img/paddock-image.png) | ![Actions](docs/img/side-actions.png) | ![Network](docs/img/side-network.png) |
+
+| Tools and skills | What this chat can use |
+|---|---|
+| ![Settings → Tools](docs/img/settings-tools.png) | ![Session tools](docs/img/session-tools.png) |
+
+*Screenshots are from real sessions of a test account on a NeuralDeep model (qwen3.8-27b): every answer, image, test run and network probe above actually happened (`tests/readme-screens.mjs`).*
 
 ## How it works
 
@@ -49,9 +57,19 @@ Paddock talks to the harness through a small protocol (threads, turns, streamed 
 | [OpenCode](https://github.com/sst/opencode) | `opencode serve`: HTTP API + SSE, any OpenAI-compatible provider | 🔜 next |
 | [Hermes Agent](https://github.com/NousResearch/hermes-agent) | headless agent from Nous Research | 🔜 coming soon |
 | [PicoClaw](https://github.com/sipeed/picoclaw) | tiny agent, models via litellm / NeuralDeep | 🔜 coming soon |
+| pi (pi-coding-agent) | minimal terminal coding agent with saved sessions | 🔜 coming soon |
+| omp (oh-my-pi) | pi with batteries: extensions, subagents | 🔜 coming soon |
 | Claude Code, Gemini CLI, … | through the same adapter interface | 💭 later |
 
 Example: one user, one workspace, a Codex chat refactoring a service in pane 1 and an OpenCode chat on a local model writing tests in pane 2; both see the same files and both can call `paddock-images`.
+
+## Multi-user
+
+Scaling is per container, not per process: **one web container for everyone, plus one harness container per user** (and two small infrastructure containers: the egress proxy and the edge). Adding a user is `./add-user.sh <name>`: a new harness container with its own volumes, token and resource limits (`mem_limit`, `cpus`, `pids_limit` in `users/<name>.yml`), a login for the web UI, nothing shared but the proxy chain. Nobody needs a VPN, a laptop that stays on or a client app: a browser and 2FA are enough, including on a phone.
+
+## Write your own tool
+
+A tool is a folder in [`web/tools/`](web/tools/README.md): `tool.json` (name, description, which key it needs), a dependency-free CLI and a `SKILL.md` that tells the agent when and how to call it. Paddock installs it into every harness of the user from **Settings → Tools**, and the side panel shows when the agent used it. [`web/tools/images`](web/tools/images) is the reference. Installing third-party tools from a git URL is on the [roadmap](docs/plans/roadmap.md).
 
 ## Quick start
 
@@ -60,7 +78,7 @@ git clone https://github.com/vakovalskii/paddock && cd paddock
 # secrets and the first user: docs/ops/deploy.md
 ./add-user.sh alice --admin
 docker compose up -d --build
-docker compose exec web npm run create-user -- alice@hub.local 'long-password-here'
+docker compose exec -w /build/current web npm run create-user -- alice@hub.local 'long-password-here'
 open http://localhost:8088
 ```
 

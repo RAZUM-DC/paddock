@@ -1,12 +1,17 @@
 // Снимки раскладок: GET — список, POST { name, data } — сохранить, DELETE ?id= — удалить.
-import { auth, codexUserOf } from "@/lib/auth";
+import { auth, harnessIdOf } from "@/lib/auth";
 import { deleteSnapshot, listSnapshots, saveSnapshot } from "@/lib/snapshots";
 
 export const dynamic = "force-dynamic";
 
 async function userOf(req: Request) {
   const session = await auth.api.getSession({ headers: req.headers }).catch(() => null);
-  return session ? codexUserOf(session.user.email) : null;
+  if (!session) return null;
+  try {
+    return harnessIdOf(session.user);
+  } catch {
+    return null;
+  }
 }
 
 export async function GET(req: Request) {

@@ -1,12 +1,17 @@
 // Метаданные ходов пользователя: GET ?ids=a,b — прочитать, POST { turns: { id: meta } } — дописать (слияние полей).
-import { auth, codexUserOf } from "@/lib/auth";
+import { auth, harnessIdOf } from "@/lib/auth";
 import { loadTurnMeta, saveTurnMeta } from "@/lib/turn-meta";
 
 export const dynamic = "force-dynamic";
 
 async function userOf(req: Request) {
   const session = await auth.api.getSession({ headers: req.headers }).catch(() => null);
-  return session ? codexUserOf(session.user.email) : null;
+  if (!session) return null;
+  try {
+    return harnessIdOf(session.user);
+  } catch {
+    return null;
+  }
 }
 
 const ID = /^[\w-]{1,80}$/;

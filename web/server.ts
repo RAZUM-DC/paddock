@@ -4,7 +4,7 @@ import { createServer, type IncomingHttpHeaders } from "node:http";
 import { readFileSync } from "node:fs";
 import next from "next";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
-import { auth, codexUserOf, ensureDb } from "./lib/auth";
+import { auth, ensureDb, harnessIdOf } from "./lib/auth";
 
 const dev = process.env.NODE_ENV !== "production";
 const port = Number(process.env.PORT ?? 3000);
@@ -40,7 +40,7 @@ server.on("upgrade", async (req, socket, head) => {
 
   let user: string, token: string;
   try {
-    user = codexUserOf(session.user.email);
+    user = harnessIdOf(session.user);
     token = readFileSync(`${tokensDir}/${user}.token`, "utf8").trim();
   } catch {
     return reject("403 Forbidden");

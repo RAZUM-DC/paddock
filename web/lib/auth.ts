@@ -2,12 +2,21 @@ import Database from "better-sqlite3";
 import { betterAuth, type BetterAuthOptions } from "better-auth";
 import { getMigrations } from "better-auth/db/migration";
 import { twoFactor } from "better-auth/plugins";
+import { chooseHarnessId, isAdmin, isValidHarnessId, legacyHarnessId, parseList } from "./identity";
 
 const publicUrl = process.env.PUBLIC_URL ?? "http://localhost:3000";
 
 // Одна SQLite на морду: пользователи и сессии (better-auth) + то, что знает только морда (метаданные ходов, см. lib/turn-meta.ts).
 // Конфиги харнесса сюда не кладём — они в его томе, он их сам читает и они переезжают вместе с ним.
 export const db = new Database(process.env.AUTH_DB ?? "/data/auth.db");
+
+// User → harness, fixed on first use: password users keep the part of their email before "@" (harness-<name> from
+// add-user.sh), see lib/identity.ts. Stored so that a later change of the rule never moves anybody to another harness.
+db.exec(`CREATE TABLE IF NOT EXISTS harness_users (
+  user_id TEXT PRIMARY KEY,
+  harness_id TEXT NOT NULL UNIQUE,
+  created_at INTEGER NOT NULL
+)`);
 
 const options = {
   database: db,
@@ -33,9 +42,33 @@ export async function ensureDb() {
   await runMigrations();
 }
 
-// Пользователь «valera@hub.local» работает со своим контейнером harness-valera.
-export function codexUserOf(email: string): string {
-  const name = email.split("@")[0];
-  if (!/^[a-z0-9-]+$/.test(name)) throw new Error(`bad codex user: ${name}`);
-  return name;
+// The rule for password users (scripts/create-user.ts checks the name with it before creating the login).
+export const codexUserOf = legacyHarnessId;
+
+type SessionUser = { id: string; email: string };
+
+const storedHarness = db.prepare("SELECT harness_id FROM harness_users WHERE user_id = ?");
+const storeHarness = db.prepare("INSERT OR IGNORE INTO harness_users (user_id, harness_id, created_at) VALUES (?, ?, ?)");
+
+// The harness of a signed-in user: harness-<id>, secrets/tokens/<id>.token. Throws when there is none — callers answer 403.
+export function harnessIdOf(user: SessionUser): string {
+  const row = storedHarness.get(user.id) as { harness_id: string } | undefined;
+  if (row) {
+    // The id becomes a host name, a file name and a container name: never trust it blindly, even from our own db.
+    if (!isValidHarnessId(row.harness_id)) throw new Error(`bad harness id for user ${user.id}`);
+    return row.harness_id;
+  }
+  const { id } = chooseHarnessId({ email: user.email, hasCredential: true });
+  // UNIQUE(harness_id): two logins can never share a harness; the loser of a race reads the winner's row.
+  if (storeHarness.run(user.id, id, Date.now()).changes === 0 && !storedHarness.get(user.id)) throw new Error(`harness ${id} belongs to another user`);
+  return (storedHarness.get(user.id) as { harness_id: string }).harness_id;
+}
+
+// Admins: ADMIN_USERS (harness ids or emails).
+export function isAdminUser(user: SessionUser): boolean {
+  let harnessId = "";
+  try {
+    harnessId = harnessIdOf(user);
+  } catch {}
+  return isAdmin({ harnessId, email: user.email, adminUsers: parseList(process.env.ADMIN_USERS), oidcAdmin: false });
 }

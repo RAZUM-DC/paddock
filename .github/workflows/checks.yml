@@ -25,6 +25,8 @@ jobs:
         run: npx tsc --noEmit -p .
       - name: i18n — every Russian key has an English translation
         run: node scripts/check-i18n.mjs
+      - name: unit tests (pure logic, node --test)
+        run: npm test
       - name: build
         run: npx next build
         env:

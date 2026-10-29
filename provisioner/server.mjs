@@ -12,7 +12,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { dockerClient } from "./docker.mjs";
-import { configFromEnv, containerCreateBody, hostPathOf, idFromPath, names, networkConnectBody, networkCreateBody, parseEnvFile, readiness, validateEnsure, volumeCreateBody } from "./lib.mjs";
+import { configFromEnv, containerCreateBody, hostPathOf, idFromPath, idOfNetwork, MANAGED_FILTER, names, networkConnectBody, networkCreateBody, parseEnvFile, readiness, validateEnsure, volumeCreateBody } from "./lib.mjs";
 
 const { cfg, errors } = configFromEnv(process.env);
 if (errors.length) {
@@ -59,6 +59,11 @@ async function ensureNetwork(id) {
     await docker.post("/networks/create", networkCreateBody(id)).catch((e) => (e.status === 409 ? null : Promise.reject(e)));
     log(`${id}: network ${n.network} created`);
   }
+  await attachShared(id);
+}
+
+async function attachShared(id) {
+  const n = names(id);
   const net = await docker.inspect(`/networks/${n.network}`);
   const attached = new Set(Object.values(net?.Containers ?? {}).map((c) => c.Name));
   // web reaches the harness by its alias; the harness reaches egress as "egress", the same name as in core.
@@ -115,6 +120,16 @@ async function status(id) {
   return { id, ...readiness(c, existsSync(tokenPath(id))) };
 }
 
+// web and egress lose their extra networks when compose recreates them; put them back.
+async function reconcile() {
+  const list = (await docker.get(`/networks?filters=${MANAGED_FILTER}`)).body;
+  for (const net of Array.isArray(list) ? list : []) {
+    const id = idOfNetwork(net);
+    if (id) await attachShared(id).catch((e) => log(`${id}: reconcile: ${e.message}`));
+  }
+}
+const reconcileLoop = () => reconcile().catch((e) => log(`reconcile: ${e.message}`));
+
 // --- HTTP ---
 
 const expected = Buffer.from(`Bearer ${cfg.token}`);
@@ -169,5 +184,11 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(cfg.port, () => log(`paddock provisioner on :${cfg.port}, image ${cfg.image}${cfg.llm ? `, provider ${cfg.llm.id}` : ""}`));
+server.listen(cfg.port, () => {
+  log(`paddock provisioner on :${cfg.port}, image ${cfg.image}${cfg.llm ? `, provider ${cfg.llm.id}` : ""}`);
+  if (cfg.reconcileMs > 0) {
+    reconcileLoop();
+    setInterval(reconcileLoop, cfg.reconcileMs).unref();
+  }
+});
 for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => server.close(() => process.exit(0)));

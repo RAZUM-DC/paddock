@@ -1,7 +1,7 @@
 // Pure provisioner logic. Run: node --test test/ (from provisioner/).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { configFromEnv, configSeed, containerCreateBody, hostPathOf, idFromPath, isValidId, names, networkConnectBody, networkCreateBody, parseEnvFile, parseMemory, readiness, tomlString, validateEnsure, volumeCreateBody } from "../lib.mjs";
+import { configFromEnv, configSeed, containerCreateBody, hostPathOf, idFromPath, idOfNetwork, isValidId, names, networkConnectBody, networkCreateBody, parseEnvFile, parseMemory, readiness, tomlString, validateEnsure, volumeCreateBody } from "../lib.mjs";
 
 const TOKEN = "t".repeat(32);
 const base = (extra = {}) => configFromEnv({ PROVISIONER_TOKEN: TOKEN, ...extra });
@@ -168,4 +168,14 @@ test("readiness: running with a token, nothing else", () => {
   assert.deepEqual(readiness({ State: { Running: true, Restarting: true } }, true), { ready: false, state: "restarting" });
   assert.deepEqual(readiness({ State: { Running: false, Status: "exited" } }, true), { ready: false, state: "exited" });
   assert.deepEqual(readiness({}, true), { ready: false, state: "stopped" });
+});
+
+test("idOfNetwork: only networks this provisioner made, named after a valid id", () => {
+  const L = (user, by = "paddock-provisioner") => ({ "paddock.user": user, "paddock.managed-by": by });
+  assert.equal(idOfNetwork({ Name: "paddock-u-alice", Labels: L("alice") }), "alice");
+  assert.equal(idOfNetwork({ Name: "paddock-u-bob", Labels: L("alice") }), null);
+  assert.equal(idOfNetwork({ Name: "paddock-u-alice", Labels: L("alice", "someone") }), null);
+  assert.equal(idOfNetwork({ Name: "paddock-u-../x", Labels: L("../x") }), null);
+  assert.equal(idOfNetwork({ Name: "bridge" }), null);
+  assert.equal(idOfNetwork(null), null);
 });

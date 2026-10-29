@@ -76,6 +76,8 @@ export function configFromEnv(env) {
     nanoCpus: Math.round((Number(env.HARNESS_CPUS) > 0 && Number(env.HARNESS_CPUS) <= 256 ? Number(env.HARNESS_CPUS) : 2) * 1e9),
     pidsLimit: int(env.HARNESS_PIDS_LIMIT, 1024, 16, 1_000_000),
     readyTimeoutMs: int(env.READY_TIMEOUT_MS, 120_000, 1000, 3_600_000),
+    // Re-attach web and egress to every user network (they lose them when compose recreates them). 0 = off.
+    reconcileMs: int(env.RECONCILE_INTERVAL_MS, 60_000, 0, 86_400_000),
     llm: null,
     mcp: [],
   };
@@ -221,6 +223,15 @@ export function containerCreateBody(id, cfg, userEnv = {}) {
     },
     NetworkingConfig: { EndpointsConfig: { [n.network]: { Aliases: [n.alias] } } },
   };
+}
+
+// Filter for GET /networks: only what this provisioner made.
+export const MANAGED_FILTER = encodeURIComponent(JSON.stringify({ label: ["paddock.managed-by=paddock-provisioner"] }));
+
+// The user id of a managed network, or null for anything else (never act on a network we did not create).
+export function idOfNetwork(net) {
+  const id = net?.Labels?.["paddock.user"];
+  return isValidId(id) && net?.Name === names(id).network && net?.Labels?.["paddock.managed-by"] === "paddock-provisioner" ? id : null;
 }
 
 // Where a bind mount of the provisioner itself comes from on the host (so harness binds use host paths).

@@ -27,6 +27,9 @@ admin: the web UI asks the provisioner, shows "preparing your workspace", and co
    `unless-stopped` as `users/_template.yml`; limits `HARNESS_MEMORY` / `HARNESS_CPUS` / `HARNESS_PIDS_LIMIT`
    (defaults 4g / 2 / 1024); attached **only** to `paddock-u-<id>` with the DNS alias `harness-<id>`.
 
+Every `RECONCILE_INTERVAL_MS` (default 60 s, `0` = off) it re-attaches web and egress to every network it made:
+`docker compose up` recreates them and they lose the networks that were attached at runtime.
+
 `GET /harness/<id>` answers `{"ready": true}` once the container is running and its token exists.
 Ids are checked strictly: `^u-[0-9a-f]{12}$` (OIDC users) or `^[a-z0-9-]{1,32}$` (legacy names).
 
@@ -59,6 +62,7 @@ only when `config.toml` does not exist yet; later edits (Settings → Codex) are
 | `WEB_CONTAINER` / `EGRESS_CONTAINER` | `paddock-web` / `paddock-egress` | |
 | `HARNESS_MEMORY` / `HARNESS_CPUS` / `HARNESS_PIDS_LIMIT` | `4g` / `2` / `1024` | |
 | `USER_ENV_DIR` | — | per-user env files |
+| `RECONCILE_INTERVAL_MS` | `60000` | re-attach web/egress to user networks; `0` = off |
 | `LLM_*`, `MCP_SERVERS_JSON` | — | see above |
 
 ## Security notes

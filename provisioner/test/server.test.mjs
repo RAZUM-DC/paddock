@@ -18,6 +18,10 @@ function fakeDocker(sock, tokensDir) {
     const json = (code, v) => { res.writeHead(code, { "content-type": "application/json" }); res.end(v === undefined ? "" : JSON.stringify(v)); };
     const b = body ? JSON.parse(body) : null;
     let m;
+    if (req.method === "GET" && path === "/networks") {
+      const want = JSON.parse(url.searchParams.get("filters") ?? "{}").label ?? [];
+      return json(200, [...state.networks.values()].filter((n) => want.every((l) => { const [k, v] = l.split("="); return n.Labels?.[k] === v; })).map((n) => ({ ...n, Containers: {} })));
+    }
     if (req.method === "GET" && (m = /^\/networks\/([^/]+)$/.exec(path))) return state.networks.has(m[1]) ? json(200, state.networks.get(m[1])) : json(404, { message: "no such network" });
     if (req.method === "POST" && path === "/networks/create") {
       if (state.networks.has(b.Name)) return json(409, { message: "exists" });
@@ -64,7 +68,7 @@ async function start(extraEnv = {}) {
   writeFileSync(join(userEnv, "alice.env"), "LLM_API_KEY=sk-test-1\nHTTPS_PROXY=http://evil:1\n");
   const port = 20000 + Math.floor(Math.random() * 20000);
   const child = spawn(process.execPath, [new URL("../server.mjs", import.meta.url).pathname], {
-    env: { PATH: process.env.PATH, PORT: String(port), PROVISIONER_TOKEN: "x".repeat(40), DOCKER_SOCKET: sock, TOKENS_DIR: tokens, USER_ENV_DIR: userEnv, ...extraEnv },
+    env: { PATH: process.env.PATH, PORT: String(port), PROVISIONER_TOKEN: "x".repeat(40), DOCKER_SOCKET: sock, TOKENS_DIR: tokens, USER_ENV_DIR: userEnv, RECONCILE_INTERVAL_MS: "0", ...extraEnv },
     stdio: ["ignore", "pipe", "pipe"],
   });
   let out = "";
@@ -175,4 +179,18 @@ test("refuses to start with a bad configuration", async () => {
   const child = spawn(process.execPath, [new URL("../server.mjs", import.meta.url).pathname], { env: { PATH: process.env.PATH, PROVISIONER_TOKEN: "x".repeat(40), LLM_PROVIDER_NAME: "openai", LLM_BASE_URL: "https://x" } });
   const code = await new Promise((r) => child.on("exit", r));
   assert.equal(code, 1);
+});
+
+test("reconcile re-attaches web and egress to managed networks after they were recreated", async () => {
+  const p = await start({ RECONCILE_INTERVAL_MS: "200" });
+  try {
+    await p.call("POST", "/harness/ensure", { id: "alice" });
+    await waitReady(p.call, "alice");
+    // Compose recreated web and egress: their dynamic attachments are gone. A foreign network must be left alone.
+    p.state.networks.get("paddock-u-alice").Containers = {};
+    p.state.networks.set("paddock-u-evil", { Name: "paddock-u-evil", Labels: { "paddock.user": "evil" }, Containers: {} });
+    await new Promise((r) => setTimeout(r, 600));
+    assert.deepEqual(Object.keys(p.state.networks.get("paddock-u-alice").Containers).sort(), ["paddock-egress", "paddock-web"]);
+    assert.deepEqual(p.state.networks.get("paddock-u-evil").Containers, {});
+  } finally { p.stop(); }
 });

@@ -194,3 +194,19 @@ test("reconcile re-attaches web and egress to managed networks after they were r
     assert.deepEqual(p.state.networks.get("paddock-u-evil").Containers, {});
   } finally { p.stop(); }
 });
+
+test("a removed container is recreated on the next ensure, with the same token", async () => {
+  const p = await start();
+  try {
+    await p.call("POST", "/harness/ensure", { id: "alice" });
+    await waitReady(p.call, "alice");
+    const token = readFileSync(join(p.tokens, "alice.token"), "utf8");
+    p.state.containers.delete("harness-alice"); // docker rm -f harness-alice (e.g. to apply a new env file)
+    assert.equal((await p.call("GET", "/harness/alice")).body.ready, false);
+    await p.call("POST", "/harness/ensure", { id: "alice" });
+    await waitReady(p.call, "alice");
+    assert.equal(readFileSync(join(p.tokens, "alice.token"), "utf8"), token);
+    assert.equal(p.state.calls.filter((c) => c === "POST /containers/create").length, 2);
+    assert.doesNotMatch(p.out(), /ensure failed/);
+  } finally { p.stop(); }
+});

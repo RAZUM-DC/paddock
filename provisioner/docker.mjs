@@ -8,7 +8,8 @@ export class DockerError extends Error {
   }
 }
 
-export function dockerClient(socketPath, { version = "v1.43", timeoutMs = 60_000 } = {}) {
+// The API version is DOCKER_API_VERSION (default v1.44, see lib.mjs); engines accept older versions down to their minimum.
+export function dockerClient(socketPath, { version = "v1.44", timeoutMs = 60_000 } = {}) {
   const call = (method, path, body) =>
     new Promise((resolve, reject) => {
       const data = body === undefined ? undefined : Buffer.from(JSON.stringify(body));

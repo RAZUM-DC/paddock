@@ -6,26 +6,32 @@ import { configFromEnv, configSeed, containerCreateBody, hostPathOf, idFromPath,
 const TOKEN = "t".repeat(32);
 const base = (extra = {}) => configFromEnv({ PROVISIONER_TOKEN: TOKEN, ...extra });
 
-test("isValidId: u-<12 hex> or a legacy name", () => {
-  for (const ok of ["u-0123456789ab", "alice", "ops-2", "a".repeat(32)]) assert.ok(isValidId(ok), ok);
-  for (const bad of ["", "u-0123456789AB", "U-0123456789ab", "a".repeat(33), "a.b", "a_b", "../etc", "alice/x", "alice\n", " alice", null, 3, {}]) assert.ok(!isValidId(bad), String(bad));
+test("isValidId: only u-<12 hex> (SSO ids); legacy names are never provisioned", () => {
+  for (const ok of ["u-0123456789ab", "u-a1ce00000001"]) assert.ok(isValidId(ok), ok);
+  for (const bad of ["alice", "evgenii", "ops-2", "a".repeat(32), "u-0123456789a", "u-0123456789abc", "", "u-0123456789AB", "U-0123456789ab", "a".repeat(33), "a.b", "a_b", "../etc",
+    "alice/x", "alice\n", " alice", "u-0123456789ab\n", null, 3, {}]) assert.ok(!isValidId(bad), String(bad));
 });
 
 test("validateEnsure: id required and checked, email and name optional and bounded", () => {
   assert.deepEqual(validateEnsure({ id: "u-0123456789ab", email: "a@b.c", name: "A B" }), { ok: true, value: { id: "u-0123456789ab", email: "a@b.c", name: "A B" } });
-  assert.deepEqual(validateEnsure({ id: "alice" }), { ok: true, value: { id: "alice", email: "", name: "" } });
-  for (const bad of [null, [], "x", {}, { id: "../x" }, { id: "alice", email: 5 }, { id: "alice", email: "a b@c" }, { id: "alice", email: "x".repeat(321) }, { id: "alice", name: "a\nb" }, { id: "alice", name: "x".repeat(201) }])
+  const U = "u-a1ce00000001";
+  assert.deepEqual(validateEnsure({ id: U }), { ok: true, value: { id: U, email: "", name: "" } });
+  assert.equal(validateEnsure({ id: "evgenii" }).ok, false, "a legacy harness is never ensured");
+  for (const bad of [null, [], "x", {}, { id: "../x" }, { id: U, email: 5 }, { id: U, email: "a b@c" }, { id: U, email: "x".repeat(321) }, { id: U, name: "a\nb" }, { id: U, name: "x".repeat(201) }])
     assert.equal(validateEnsure(bad).ok, false, JSON.stringify(bad));
 });
 
 test("idFromPath: exactly /harness/<valid id>", () => {
-  assert.equal(idFromPath("/harness/alice"), "alice");
+  assert.equal(idFromPath("/harness/alice"), null);
   assert.equal(idFromPath("/harness/u-0123456789ab"), "u-0123456789ab");
-  for (const p of ["/harness/", "/harness/alice/x", "/harness/..", "/harness/%2e%2e", "/harnessx/alice", "/harness/Alice", "/x/harness/alice"]) assert.equal(idFromPath(p), null, p);
+  for (const p of ["/harness/", "/harness/u-0123456789ab/x", "/harness/..", "/harness/%2e%2e", "/harnessx/alice", "/harness/Alice", "/x/harness/alice"]) assert.equal(idFromPath(p), null, p);
 });
 
 test("names", () => {
-  assert.deepEqual(names("alice"), { container: "harness-alice", alias: "harness-alice", network: "paddock-u-alice", home: "harness-home-alice", workspace: "workspace-alice", token: "alice.token", envFile: "alice.env" });
+  const U = "u-a1ce00000001";
+  assert.deepEqual(names(U), { container: `harness-${U}`, alias: `harness-${U}`, network: `paddock-u-${U}`, home: `harness-home-${U}`, workspace: `workspace-${U}`, token: `${U}.token`, envFile: `${U}.env`, bridge: "pua1ce00000001" });
+  assert.ok(names(U).bridge.length <= 15, "Linux interface names are at most 15 characters");
+  assert.match(names(U).bridge, /^pu[0-9a-f]{12}$/);
 });
 
 test("parseMemory", () => {
@@ -44,7 +50,9 @@ test("configFromEnv: defaults", () => {
   assert.equal(cfg.image, "paddock-harness-codex");
   assert.equal(cfg.memory, 4 * 1024 ** 3);
   assert.equal(cfg.nanoCpus, 2e9);
-  assert.equal(cfg.pidsLimit, 1024);
+  assert.equal(cfg.pidsLimit, 512);
+  assert.equal(cfg.dockerApiVersion, "v1.44");
+  assert.equal(cfg.maxHarnesses, 0);
   assert.equal(cfg.readyTimeoutMs, 120000);
   assert.equal(cfg.webContainer, "paddock-web");
   assert.equal(cfg.webAlias, "web");
@@ -60,7 +68,11 @@ test("configFromEnv: limits from env", () => {
   assert.equal(cfg.pidsLimit, 2048);
   assert.equal(cfg.image, "reg/harness:1");
   assert.equal(base({ HARNESS_CPUS: "-1" }).cfg.nanoCpus, 2e9);
-  assert.equal(base({ HARNESS_PIDS_LIMIT: "1" }).cfg.pidsLimit, 1024);
+  assert.equal(base({ HARNESS_PIDS_LIMIT: "1" }).cfg.pidsLimit, 512);
+  assert.equal(base({ DOCKER_API_VERSION: "v1.47" }).cfg.dockerApiVersion, "v1.47");
+  for (const bad of ["1.44", "v2.0", "v1.4", "latest", "v1.44/../x"]) assert.ok(base({ DOCKER_API_VERSION: bad }).errors.some((e) => /DOCKER_API_VERSION/.test(e)), bad);
+  assert.equal(base({ MAX_HARNESSES: "25" }).cfg.maxHarnesses, 25);
+  for (const bad of ["-1", "lots", "2.5"]) assert.ok(base({ MAX_HARNESSES: bad }).errors.some((e) => /MAX_HARNESSES/.test(e)), bad);
 });
 
 test("configFromEnv: token is mandatory", () => {
@@ -116,7 +128,8 @@ test("parseEnvFile: KEY=value, quotes, comments, reserved and bad names skipped"
 });
 
 test("networkCreateBody: internal bridge, labelled", () => {
-  assert.deepEqual(networkCreateBody("alice"), { Name: "paddock-u-alice", Driver: "bridge", Internal: true, Labels: { "paddock.user": "alice", "paddock.managed-by": "paddock-provisioner" } });
+  const U = "u-a1ce00000001";
+  assert.deepEqual(networkCreateBody(U), { Name: `paddock-u-${U}`, Driver: "bridge", Internal: true, Options: { "com.docker.network.bridge.name": "pua1ce00000001" }, Labels: { "paddock.user": U, "paddock.managed-by": "paddock-provisioner" } });
 });
 
 test("networkConnectBody and volumeCreateBody", () => {
@@ -126,22 +139,24 @@ test("networkConnectBody and volumeCreateBody", () => {
 
 test("containerCreateBody: same command and hardening as users/_template.yml, own network only", () => {
   const { cfg } = base();
-  const b = containerCreateBody("alice", { ...cfg, hostTokensDir: "/srv/paddock/secrets/tokens" });
+  const b = containerCreateBody("u-a1ce00000001", { ...cfg, hostTokensDir: "/srv/paddock/secrets/tokens" });
   assert.equal(b.Image, "paddock-harness-codex");
   assert.deepEqual(b.Cmd, ["codex", "app-server", "--listen", "ws://0.0.0.0:4500", "--ws-auth", "capability-token", "--ws-token-file", "/run/secrets/ws-token"]);
   assert.deepEqual(b.Env, ["HTTPS_PROXY=http://egress:8080", "HTTP_PROXY=http://egress:8080", "NO_PROXY=localhost,127.0.0.1", "PADDOCK_WEB_URL=http://paddock-web:3000"]);
-  assert.deepEqual(b.Labels, { "paddock.user": "alice", "paddock.managed-by": "paddock-provisioner" });
+  assert.deepEqual(b.Labels, { "paddock.user": "u-a1ce00000001", "paddock.managed-by": "paddock-provisioner" });
   assert.deepEqual(b.HostConfig, {
-    Binds: ["harness-home-alice:/home/codex/.codex", "workspace-alice:/workspace", "/srv/paddock/secrets/tokens/alice.token:/run/secrets/ws-token:ro"],
-    NetworkMode: "paddock-u-alice",
+    Binds: ["harness-home-u-a1ce00000001:/home/codex/.codex", "workspace-u-a1ce00000001:/workspace", "/srv/paddock/secrets/tokens/u-a1ce00000001.token:/run/secrets/ws-token:ro"],
+    NetworkMode: "paddock-u-u-a1ce00000001",
     RestartPolicy: { Name: "unless-stopped" },
     CapDrop: ["ALL"],
     SecurityOpt: ["no-new-privileges:true"],
     Memory: 4 * 1024 ** 3,
     NanoCpus: 2e9,
-    PidsLimit: 1024,
+    PidsLimit: 512,
+    MemorySwap: 4 * 1024 ** 3,
+    LogConfig: { Type: "json-file", Config: { "max-size": "10m", "max-file": "3" } },
   });
-  assert.deepEqual(b.NetworkingConfig, { EndpointsConfig: { "paddock-u-alice": { Aliases: ["harness-alice"] } } });
+  assert.deepEqual(b.NetworkingConfig, { EndpointsConfig: { "paddock-u-u-a1ce00000001": { Aliases: ["harness-u-a1ce00000001"] } } });
 });
 
 test("containerCreateBody: user env passes, cannot override the proxy; seed goes in env", () => {
@@ -175,9 +190,11 @@ test("readiness: running with a token, nothing else", () => {
 
 test("idOfNetwork: only networks this provisioner made, named after a valid id", () => {
   const L = (user, by = "paddock-provisioner") => ({ "paddock.user": user, "paddock.managed-by": by });
-  assert.equal(idOfNetwork({ Name: "paddock-u-alice", Labels: L("alice") }), "alice");
-  assert.equal(idOfNetwork({ Name: "paddock-u-bob", Labels: L("alice") }), null);
-  assert.equal(idOfNetwork({ Name: "paddock-u-alice", Labels: L("alice", "someone") }), null);
+  const U = "u-a1ce00000001";
+  assert.equal(idOfNetwork({ Name: `paddock-u-${U}`, Labels: L(U) }), U);
+  assert.equal(idOfNetwork({ Name: "paddock-u-u-b0b000000001", Labels: L(U) }), null);
+  assert.equal(idOfNetwork({ Name: `paddock-u-${U}`, Labels: L(U, "someone") }), null);
+  assert.equal(idOfNetwork({ Name: "paddock-u-alice", Labels: L("alice") }), null, "legacy names are not ours");
   assert.equal(idOfNetwork({ Name: "paddock-u-../x", Labels: L("../x") }), null);
   assert.equal(idOfNetwork({ Name: "bridge" }), null);
   assert.equal(idOfNetwork(null), null);
@@ -196,4 +213,23 @@ test("missingAliases: from the container's endpoint on that network", () => {
 test("configFromEnv: WEB_PORT", () => {
   assert.equal(base().cfg.webPort, 3000);
   assert.equal(base({ WEB_PORT: "8080" }).cfg.webPort, 8080);
+});
+
+test("RESERVED_ENV: a per-user env file can set none of the proxy, config-home, seed or web-URL variables", () => {
+  const { cfg } = base({ LLM_PROVIDER_NAME: "corp", LLM_BASE_URL: "https://llm.example/v1" });
+  const evil = { HTTPS_PROXY: "http://evil:1", HTTP_PROXY: "http://evil:1", NO_PROXY: "*", https_proxy: "http://evil:1", http_proxy: "http://evil:1", no_proxy: "*",
+    CODEX_HOME: "/tmp/x", PADDOCK_CONFIG_PREPEND: "model_provider = \"evil\"", PADDOCK_CONFIG_APPEND: "[x]", PADDOCK_WEB_URL: "http://evil:1", OK_VAR: "fine" };
+  const env = Object.fromEntries(containerCreateBody("u-a1ce00000001", { ...cfg, hostTokensDir: "/h" }, evil).Env.map((e) => [e.slice(0, e.indexOf("=")), e.slice(e.indexOf("=") + 1)]));
+  assert.equal(env.OK_VAR, "fine");
+  assert.equal(env.HTTPS_PROXY, "http://egress:8080");
+  assert.equal(env.HTTP_PROXY, "http://egress:8080");
+  assert.equal(env.NO_PROXY, "localhost,127.0.0.1");
+  assert.equal(env.PADDOCK_WEB_URL, "http://paddock-web:3000");
+  assert.equal(env.PADDOCK_CONFIG_PREPEND, 'model_provider = "corp"');
+  assert.ok(env.PADDOCK_CONFIG_APPEND.startsWith("[model_providers.corp]"));
+  for (const k of ["https_proxy", "http_proxy", "no_proxy", "CODEX_HOME"]) assert.equal(env[k], undefined, k);
+  // The env file parser reports them as skipped.
+  const { vars, skipped } = parseEnvFile(Object.entries(evil).map(([k, v]) => `${k}=${v}`).join("\n"));
+  assert.deepEqual(Object.keys(vars), ["OK_VAR"]);
+  assert.equal(skipped.length, Object.keys(evil).length - 1);
 });

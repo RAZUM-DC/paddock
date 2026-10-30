@@ -1,7 +1,9 @@
 // Pure logic of the provisioner: validation, names, Docker Engine API request bodies, the harness config seed.
 // No I/O here, so every rule is unit-tested (provisioner/test/) and the server stays a thin shell around it.
 
-export const ID_RE = /^u-[0-9a-f]{12}$|^[a-z0-9-]{1,32}$/;
+// Only the ids web derives for SSO users (u-<12 hex>). Legacy names (add-user.sh harnesses on core) are never
+// provisioned: a provisioner must not create, recreate or attach anything for them.
+export const ID_RE = /^u-[0-9a-f]{12}$/;
 export const isValidId = (id) => typeof id === "string" && ID_RE.test(id);
 
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -19,6 +21,8 @@ export const names = (id) => ({
   workspace: `workspace-${id}`,
   token: `${id}.token`,
   envFile: `${id}.env`,
+  // Linux bridge name of the user network (≤ 15 characters), so the host firewall can match "pu*".
+  bridge: `pu${id.slice(2)}`,
 });
 
 // POST /harness/ensure body: {id, email, name}. Returns {ok, value} or {ok: false, error}.
@@ -62,6 +66,9 @@ export function configFromEnv(env) {
     port: int(env.PORT, 8080, 1, 65535),
     token: env.PROVISIONER_TOKEN ?? "",
     dockerSocket: env.DOCKER_SOCKET || "/var/run/docker.sock",
+    dockerApiVersion: env.DOCKER_API_VERSION || "v1.44",
+    // 0 = no limit. Beyond it, ensure refuses to create new harnesses (existing ones keep working).
+    maxHarnesses: int(env.MAX_HARNESSES, 0, 0, 100_000),
     image: env.HARNESS_IMAGE || "paddock-harness-codex",
     pullMissingImage: env.PULL_MISSING_IMAGE === "1",
     tokensDir: env.TOKENS_DIR || "/run/secrets/tokens",
@@ -77,7 +84,7 @@ export function configFromEnv(env) {
     egressPort: int(env.EGRESS_PORT, 8080, 1, 65535),
     memory: parseMemory(env.HARNESS_MEMORY ?? "4g"),
     nanoCpus: Math.round((Number(env.HARNESS_CPUS) > 0 && Number(env.HARNESS_CPUS) <= 256 ? Number(env.HARNESS_CPUS) : 2) * 1e9),
-    pidsLimit: int(env.HARNESS_PIDS_LIMIT, 1024, 16, 1_000_000),
+    pidsLimit: int(env.HARNESS_PIDS_LIMIT, 512, 16, 1_000_000),
     readyTimeoutMs: int(env.READY_TIMEOUT_MS, 120_000, 1000, 3_600_000),
     // Re-attach web and egress to every user network (they lose them when compose recreates them). 0 = off.
     reconcileMs: int(env.RECONCILE_INTERVAL_MS, 60_000, 0, 86_400_000),
@@ -85,6 +92,8 @@ export function configFromEnv(env) {
     mcp: [],
   };
   if (cfg.token.length < 16) errors.push("PROVISIONER_TOKEN must be set (16+ characters)");
+  if (!/^v1\.\d{2}$/.test(cfg.dockerApiVersion)) errors.push(`DOCKER_API_VERSION "${cfg.dockerApiVersion}": expected v1.NN (e.g. v1.44)`);
+  if (env.MAX_HARNESSES !== undefined && env.MAX_HARNESSES !== "" && !/^\d+$/.test(env.MAX_HARNESSES)) errors.push("MAX_HARNESSES must be a whole number (0 = no limit)");
   if (cfg.hostTokensDir && !cfg.hostTokensDir.startsWith("/")) errors.push("HOST_TOKENS_DIR must be an absolute path on the host");
 
   if (env.LLM_PROVIDER_NAME) {
@@ -188,6 +197,7 @@ export function networkCreateBody(id) {
     Driver: "bridge",
     // No route out: the harness reaches the internet only through the egress proxy on this network.
     Internal: true,
+    Options: { "com.docker.network.bridge.name": names(id).bridge },
     Labels: { "paddock.user": id, "paddock.managed-by": "paddock-provisioner" },
   };
 }
@@ -236,6 +246,9 @@ export function containerCreateBody(id, cfg, userEnv = {}) {
       Memory: cfg.memory,
       NanoCpus: cfg.nanoCpus,
       PidsLimit: cfg.pidsLimit,
+      // No swap beyond the memory limit, and bounded logs (an agent can print a lot).
+      MemorySwap: cfg.memory,
+      LogConfig: { Type: "json-file", Config: { "max-size": "10m", "max-file": "3" } },
     },
     NetworkingConfig: { EndpointsConfig: { [n.network]: { Aliases: [n.alias] } } },
   };
@@ -263,3 +276,6 @@ export function readiness(inspect, tokenPresent) {
   if (st.Running && !st.Restarting && tokenPresent) return { ready: true, state: "running" };
   return { ready: false, state: st.Restarting ? "restarting" : st.Running ? "starting" : st.Status || "stopped" };
 }
+
+// Filter for GET /containers/json: harness containers this provisioner made.
+export const MANAGED_CONTAINERS_FILTER = encodeURIComponent(JSON.stringify({ label: ["paddock.managed-by=paddock-provisioner"] }));

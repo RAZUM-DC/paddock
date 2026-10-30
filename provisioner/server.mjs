@@ -12,14 +12,14 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { dockerClient } from "./docker.mjs";
-import { configFromEnv, containerCreateBody, hostPathOf, idFromPath, idOfNetwork, MANAGED_FILTER, missingAliases, names, networkConnectBody, networkCreateBody, parseEnvFile, readiness, validateEnsure, volumeCreateBody } from "./lib.mjs";
+import { configFromEnv, MANAGED_CONTAINERS_FILTER, containerCreateBody, hostPathOf, idFromPath, idOfNetwork, MANAGED_FILTER, missingAliases, names, networkConnectBody, networkCreateBody, parseEnvFile, readiness, validateEnsure, volumeCreateBody } from "./lib.mjs";
 
 const { cfg, errors } = configFromEnv(process.env);
 if (errors.length) {
   for (const e of errors) console.error(`config: ${e}`);
   process.exit(1);
 }
-const docker = dockerClient(cfg.dockerSocket);
+const docker = dockerClient(cfg.dockerSocket, { version: cfg.dockerApiVersion });
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 // Harness containers bind the token file from the host: the daemon resolves bind sources on the host, not here.
@@ -94,18 +94,41 @@ async function ensureImage() {
   await docker.call("POST", `/images/create?fromImage=${encodeURIComponent(cfg.image)}`);
 }
 
+// MAX_HARNESSES: how many managed harness containers exist (running or not).
+async function managedCount() {
+  const list = (await docker.get(`/containers/json?all=1&filters=${MANAGED_CONTAINERS_FILTER}`)).body;
+  return Array.isArray(list) ? list.length : 0;
+}
+
+class LimitError extends Error {}
+
+// Creations are serialised, so concurrent ensures for different users cannot overshoot MAX_HARNESSES.
+let creating = Promise.resolve();
+
 async function ensureContainer(id) {
   const n = names(id);
   let c = await docker.inspect(`/containers/${n.container}/json`);
   if (!c) {
-    await ensureImage();
-    const body = containerCreateBody(id, { ...cfg, hostTokensDir: await resolveHostTokensDir() }, userEnv(id));
-    await docker.post(`/containers/create?name=${n.container}`, body).catch((e) => (e.status === 409 ? null : Promise.reject(e)));
-    log(`${id}: container ${n.container} created`);
+    const turn = creating.then(async () => {
+      if (await docker.inspect(`/containers/${n.container}/json`)) return;
+      if (cfg.maxHarnesses > 0 && (await managedCount()) >= cfg.maxHarnesses) throw new LimitError(`harness limit reached (MAX_HARNESSES=${cfg.maxHarnesses})`);
+      await createContainer(id);
+    });
+    creating = turn.catch(() => {});
+    await turn;
     c = await docker.inspect(`/containers/${n.container}/json`);
   }
+  // Never start (or adopt) a container with this name that is not ours for this id.
   if (c && c.Config?.Labels?.["paddock.user"] !== id) throw new Error(`${n.container} exists but is not managed for ${id}`);
   if (!c?.State?.Running) await docker.post(`/containers/${n.container}/start`).catch((e) => (e.status === 304 ? null : Promise.reject(e)));
+}
+
+async function createContainer(id) {
+  const n = names(id);
+  await ensureImage();
+  const body = containerCreateBody(id, { ...cfg, hostTokensDir: await resolveHostTokensDir() }, userEnv(id));
+  await docker.post(`/containers/create?name=${n.container}`, body).catch((e) => (e.status === 409 ? null : Promise.reject(e)));
+  log(`${id}: container ${n.container} created`);
 }
 
 // One ensure per id at a time; concurrent callers share it.
@@ -175,6 +198,9 @@ const server = createServer(async (req, res) => {
       const v = validateEnsure(await readJson(req));
       if (!v.ok) return send(res, 400, { error: v.error });
       log(`${v.value.id}: ensure requested${v.value.email ? ` for ${v.value.email}` : ""}`);
+      // A new harness beyond MAX_HARNESSES is refused at once (existing ones are always ensured).
+      if (cfg.maxHarnesses > 0 && !(await docker.inspect(`/containers/${names(v.value.id).container}/json`)) && (await managedCount()) >= cfg.maxHarnesses)
+        return send(res, 409, { error: `harness limit reached (MAX_HARNESSES=${cfg.maxHarnesses})` });
       // Answer at once; web polls GET /harness/<id>. Errors are logged and show as "not ready".
       ensure(v.value.id).catch((e) => log(`${v.value.id}: ensure failed: ${e.message}`));
       return send(res, 202, await status(v.value.id));

@@ -43,9 +43,9 @@ before(async () => {
   db.prepare("INSERT INTO harness_users VALUES (?, ?, ?)").run("user-alice", "alice", 1);
   db.prepare("INSERT INTO harness_users VALUES (?, ?, ?)").run("user-bob", "u-0123456789ab", 1);
   git = gitAccountStore(db, () => Buffer.alloc(32, 7));
-  git.add("user-alice", { host: "github.com", prefix: "", token: "alice-any-token" });
-  git.add("user-alice", { host: "github.com", prefix: "my-org", username: "alice-bot", token: "alice-org-token" });
-  git.add("user-bob", { host: "github.com", prefix: "bob-org", token: "bob-token" });
+  git.add("user-alice", { host: "github.com", prefix: "", token: "alice-any-token-0123" });
+  git.add("user-alice", { host: "github.com", prefix: "my-org", username: "alice-bot", token: "alice-org-token-0123" });
+  git.add("user-bob", { host: "github.com", prefix: "bob-org", token: "bob-token-0123456789" });
   secrets = secretRequestStore({ workspace });
   logs = [];
   server = await boot();
@@ -98,13 +98,15 @@ test("harness authentication: no, wrong, short or unknown tokens get 401", async
 
 test("git-credential: the caller's own accounts only, longest prefix, https only, 204 otherwise", async () => {
   const q = (token, path, protocol = "https", host = "github.com") => call("POST", "/api/harness/git-credential", { token, body: { protocol, host, path } });
-  assert.deepEqual((await q(TOK_ALICE, "someone/repo.git")).json, { username: "x-access-token", password: "alice-any-token" });
-  assert.deepEqual((await q(TOK_ALICE, "my-org/repo.git")).json, { username: "alice-bot", password: "alice-org-token" });
+  assert.deepEqual((await q(TOK_ALICE, "someone/repo.git")).json, { username: "x-access-token", password: "alice-any-token-0123" });
+  assert.deepEqual((await q(TOK_ALICE, "my-org/repo.git")).json, { username: "alice-bot", password: "alice-org-token-0123" });
   assert.equal((await q(TOK_ALICE, "x/y", "http")).status, 204);
   assert.equal((await q(TOK_ALICE, "x/y", "https", "gitlab.com")).status, 204);
   // Bob's token reaches only Bob's account, never Alice's catch-all.
   assert.equal((await q(TOK_BOB, "someone/repo.git")).status, 204);
-  assert.equal((await q(TOK_BOB, "bob-org/r.git")).json.password, "bob-token");
+  assert.equal((await q(TOK_BOB, "bob-org/r.git")).json.password, "bob-token-0123456789");
+  // git passes paths raw: traversal out of a prefix matches nothing at all.
+  assert.equal((await q(TOK_ALICE, "my-org/../other-org/repo.git")).status, 204);
   // A harness whose owner never signed in to web has no accounts.
   assert.equal((await q(TOK_NOUSER, "someone/repo.git")).status, 204);
   assert.equal((await call("GET", "/api/harness/git-credential", { token: TOK_ALICE })).status, 405);
@@ -113,7 +115,7 @@ test("git-credential: the caller's own accounts only, longest prefix, https only
 
 test("git-credential log: harness, host, account id; never the token or the path", async () => {
   logs.length = 0;
-  await call("POST", "/api/harness/git-credential", { token: TOK_ALICE, body: { protocol: "https", host: "github.com", path: "my-org/secret-repo-name.git?x=1" } });
+  await call("POST", "/api/harness/git-credential", { token: TOK_ALICE, body: { protocol: "https", host: "github.com", path: "my-org/secret-repo-name.git" } });
   await call("POST", "/api/harness/git-credential", { token: TOK_ALICE, body: { protocol: "https", host: "gitlab.com", path: "a/b" } });
   assert.equal(logs.length, 2);
   assert.deepEqual(Object.keys(logs[0]).sort(), ["account", "event", "harness", "host"]);
@@ -122,7 +124,7 @@ test("git-credential log: harness, host, account id; never the token or the path
   assert.match(logs[0].account, /^[0-9a-f]{24}$/);
   assert.equal(logs[1].account, null);
   const text = JSON.stringify(logs);
-  for (const s of [TOK_ALICE, "alice-org-token", "secret-repo-name", "my-org"]) assert.ok(!text.includes(s), s);
+  for (const s of [TOK_ALICE, "alice-org-token-0123", "secret-repo-name", "my-org"]) assert.ok(!text.includes(s), s);
 });
 
 test("rate limit per harness", async () => {
@@ -157,10 +159,10 @@ test("PADDOCK_HARNESS_API=0 (enabled: false) answers 404", async () => {
 test("helper: get prints username/password from web; parses git's stdin", async () => {
   const r = await helper("get", "protocol=https\nhost=github.com\npath=my-org/repo.git\nwwwauth[]=Basic realm=\"GitHub\"\n\n");
   assert.equal(r.code, 0);
-  assert.equal(r.out, "username=alice-bot\npassword=alice-org-token\n");
+  assert.equal(r.out, "username=alice-bot\npassword=alice-org-token-0123\n");
   assert.equal(r.err, "");
   const crlf = await helper("get", "protocol=https\r\nhost=github.com\r\npath=x/y\r\n\r\n");
-  assert.equal(crlf.out, "username=x-access-token\npassword=alice-any-token\n");
+  assert.equal(crlf.out, "username=x-access-token\npassword=alice-any-token-0123\n");
 });
 
 test("helper: nothing on no match, http, errors, store/erase, or when switched off", async () => {
@@ -204,7 +206,7 @@ test("helper: never contacts web for anything but https", async () => {
 
 test("helper: ignores HTTP(S)_PROXY and talks to web directly", async () => {
   const r = await helper("get", "protocol=https\nhost=github.com\npath=x/y\n", { HTTP_PROXY: "http://127.0.0.1:1", HTTPS_PROXY: "http://127.0.0.1:1", http_proxy: "http://127.0.0.1:1", NODE_USE_ENV_PROXY: "1" });
-  assert.equal(r.out, "username=x-access-token\npassword=alice-any-token\n");
+  assert.equal(r.out, "username=x-access-token\npassword=alice-any-token-0123\n");
 });
 
 test("helper: an answer with a line break is dropped; the token never reaches stderr", async () => {
@@ -241,7 +243,7 @@ test("real git: `git credential fill` gets the token through the helper", async 
   const r = await fill("url=https://github.com/my-org/repo.git\n\n");
   assert.equal(r.code, 0);
   assert.match(r.out, /^username=alice-bot$/m);
-  assert.match(r.out, /^password=alice-org-token$/m);
+  assert.match(r.out, /^password=alice-org-token-0123$/m);
   // No match: git asks the terminal, which is off, so it fails as usual.
   assert.notEqual((await fill("url=https://gitlab.com/a/b.git\n\n")).code, 0);
 });

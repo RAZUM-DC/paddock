@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
 import Database from "better-sqlite3";
-import { defaultUsername, gitAccountStore, MAX_ACCOUNTS, normalizeHost, normalizePrefix, pickAccount, prefixCovers, validateAccount, validToken } from "../lib/git-accounts.ts";
+import { defaultUsername, gitAccountStore, MAX_ACCOUNTS, MIN_TOKEN, normalizeHost, pathSegments, normalizePrefix, pickAccount, prefixCovers, validateAccount, validToken } from "../lib/git-accounts.ts";
 
 const key = randomBytes(32);
 const fresh = () => {
@@ -38,10 +38,11 @@ test("defaultUsername: x-access-token for github.com, oauth2 elsewhere", () => {
   assert.equal(defaultUsername("github.example.com"), "oauth2");
 });
 
-test("validToken: 1..4096 characters, single line", () => {
-  assert.ok(validToken("t"));
+test("validToken: 16..4096 characters, single line", () => {
+  assert.equal(MIN_TOKEN, 16);
+  assert.ok(validToken("t".repeat(16)));
   assert.ok(validToken("t".repeat(4096)));
-  for (const bad of ["", "t".repeat(4097), "a\nb", "a\rb", "a\u0000b", "a\tb", 5, null]) assert.ok(!validToken(bad), JSON.stringify(bad));
+  for (const bad of ["", "t", "t".repeat(15), "t".repeat(4097), "a".repeat(10) + "\nb".repeat(5), "a\rb".repeat(6), "a\u0000b".repeat(6), "a\tb".repeat(6), 5, null]) assert.ok(!validToken(bad), JSON.stringify(bad));
 });
 
 test("validateAccount: defaults and errors", () => {
@@ -52,7 +53,7 @@ test("validateAccount: defaults and errors", () => {
   assert.equal(gl.value.username, "oauth2");
   assert.equal(gl.value.label, "Work");
   assert.equal(validateAccount(acct({ username: "bot" })).value.username, "bot");
-  for (const bad of [null, [], "x", acct({ host: "https://github.com" }), acct({ prefix: "../x" }), acct({ token: "" }), acct({ token: "a\nusername=evil" }), acct({ token: "t".repeat(4097) }),
+  for (const bad of [null, [], "x", acct({ host: "https://github.com" }), acct({ prefix: "../x" }), acct({ token: "" }), acct({ token: "a\nusername=evil-and-more" }), acct({ token: "short-token" }), acct({ token: "t".repeat(4097) }),
     acct({ username: "a b" }), acct({ username: "a=b" }), acct({ username: "a\nb" }), acct({ label: "x".repeat(81) }), acct({ label: "a\nb" })])
     assert.equal(validateAccount(bad).ok, false, JSON.stringify(bad));
 });
@@ -69,6 +70,20 @@ test("prefixCovers: whole leading segments, .git ignored", () => {
   assert.ok(!prefixCovers("my-org/repo", "my-org"));
   assert.ok(!prefixCovers("my-org", undefined));
   assert.ok(!prefixCovers("my-org", ""));
+});
+
+test("pathSegments / prefixCovers: raw paths with traversal or encoding match nothing", () => {
+  assert.deepEqual(pathSegments("my-org/repo.git"), ["my-org", "repo"]);
+  assert.deepEqual(pathSegments("/my-org/repo.git/"), ["my-org", "repo"]);
+  assert.deepEqual(pathSegments(undefined), []);
+  assert.deepEqual(pathSegments(""), []);
+  for (const bad of ["my-org/../other-org/repo.git", "my-org/./repo.git", "my-org//repo.git", "../x", "my-org/%2e%2e/other/repo", "my-org%2Frepo", "my-org/repo?x=1", "my-org/repo#a", "my-org\\..\\x", "a\nb", "//", "my-org/repo//"])
+    assert.equal(pathSegments(bad), null, bad);
+  assert.ok(!prefixCovers("my-org", "my-org/../other-org/repo.git"));
+  assert.ok(!prefixCovers("", "my-org/../other-org/repo.git"));
+  const list = [{ id: "org", host: "github.com", prefix: "my-org" }, { id: "any", host: "github.com", prefix: "" }];
+  for (const path of ["my-org/../other-org/repo.git", "my-org/%2e%2e/other-org/repo.git", "my-org//repo.git"])
+    assert.equal(pickAccount(list, { protocol: "https", host: "github.com", path }), null, path);
 });
 
 test("pickAccount: https only, exact host, longest prefix wins", () => {
@@ -118,31 +133,52 @@ test("store: limits and duplicates", () => {
   assert.equal(MAX_ACCOUNTS, 20);
   assert.throws(() => store.add("u1", acct({ prefix: "one-more" })), /at most 20/);
   store.add("u2", acct({ prefix: "org0" }));
-  assert.throws(() => store.add("u2", acct({ prefix: "org0/", token: "other" })), /exists already/);
+  assert.throws(() => store.add("u2", acct({ prefix: "org0/", token: "other-token-0123456" })), /exists already/);
   assert.throws(() => store.add("u2", acct({ host: "https://x" })), /host/);
 });
 
 test("store: credentialFor matches only the user's own accounts", () => {
   const { store } = fresh();
-  const a1 = store.add("u1", acct({ token: "tok-u1-any" }));
-  const a1org = store.add("u1", acct({ token: "tok-u1-org", prefix: "my-org", username: "bot" }));
-  store.add("u2", acct({ token: "tok-u2-special", prefix: "my-org/special" }));
+  const a1 = store.add("u1", acct({ token: "tok-u1-any-0123456" }));
+  const a1org = store.add("u1", acct({ token: "tok-u1-org-0123456", prefix: "my-org", username: "bot" }));
+  store.add("u2", acct({ token: "tok-u2-special-0123", prefix: "my-org/special" }));
   const q = (path, protocol = "https", host = "github.com") => ({ protocol, host, path });
-  assert.deepEqual(store.credentialFor("u1", q("x/y.git")), { account: a1.id, username: "x-access-token", password: "tok-u1-any" });
-  assert.deepEqual(store.credentialFor("u1", q("my-org/special.git")), { account: a1org.id, username: "bot", password: "tok-u1-org" });
+  assert.deepEqual(store.credentialFor("u1", q("x/y.git")), { account: a1.id, username: "x-access-token", password: "tok-u1-any-0123456" });
+  assert.deepEqual(store.credentialFor("u1", q("my-org/special.git")), { account: a1org.id, username: "bot", password: "tok-u1-org-0123456" });
   assert.equal(store.credentialFor("u2", q("x/y.git")), null);
-  assert.equal(store.credentialFor("u2", q("my-org/special.git")).password, "tok-u2-special");
+  assert.equal(store.credentialFor("u2", q("my-org/special.git")).password, "tok-u2-special-0123");
   assert.equal(store.credentialFor("u3", q("my-org/special.git")), null);
   assert.equal(store.credentialFor("u1", q("x/y.git", "http")), null);
 });
 
+test("store: editing host, prefix or username in the database makes the token undecryptable", () => {
+  for (const [col, val, q] of [["host", "evil.example", { host: "evil.example", path: "my-org/r" }], ["prefix", "", { host: "github.com", path: "other/r" }], ["username", "attacker", { host: "github.com", path: "my-org/r" }]]) {
+    const { db, store } = fresh();
+    const a = store.add("u1", acct({ token: "tok-u1-0123456789ab", prefix: "my-org" }));
+    assert.equal(store.credentialFor("u1", { protocol: "https", host: "github.com", path: "my-org/r" }).password, "tok-u1-0123456789ab");
+    db.prepare(`UPDATE git_accounts SET ${col} = ? WHERE id = ?`).run(val, a.id);
+    assert.equal(store.credentialFor("u1", { protocol: "https", ...q }), null, col);
+  }
+});
+
+test("store: removeAll and count, per user", () => {
+  const { store } = fresh();
+  store.add("u1", acct({ prefix: "a" }));
+  store.add("u1", acct({ prefix: "b" }));
+  store.add("u2", acct());
+  assert.equal(store.count("u1"), 2);
+  assert.equal(store.removeAll("u1"), 2);
+  assert.equal(store.count("u1"), 0);
+  assert.equal(store.count("u2"), 1);
+});
+
 test("store: a token moved to another row or user, or a wrong key, does not decrypt", () => {
   const { db, store } = fresh();
-  const a = store.add("u1", acct({ token: "tok-u1" }));
-  const b = store.add("u2", acct({ token: "tok-u2" }));
+  const a = store.add("u1", acct({ token: "tok-u1-0123456789ab" }));
+  const b = store.add("u2", acct({ token: "tok-u2-0123456789ab" }));
   db.prepare("UPDATE git_accounts SET token_enc = (SELECT token_enc FROM git_accounts WHERE id = ?) WHERE id = ?").run(a.id, b.id);
   assert.equal(store.credentialFor("u2", { protocol: "https", host: "github.com", path: "x" }), null);
   const other = gitAccountStore(db, () => randomBytes(32));
   assert.equal(other.credentialFor("u1", { protocol: "https", host: "github.com", path: "x" }), null);
-  assert.equal(store.credentialFor("u1", { protocol: "https", host: "github.com", path: "x" }).password, "tok-u1");
+  assert.equal(store.credentialFor("u1", { protocol: "https", host: "github.com", path: "x" }).password, "tok-u1-0123456789ab");
 });

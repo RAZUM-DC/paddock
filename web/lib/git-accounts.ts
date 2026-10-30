@@ -8,6 +8,9 @@ import { open, seal } from "./secret-box";
 
 export const MAX_ACCOUNTS = 20;
 export const MAX_TOKEN = 4096;
+// Real tokens (GitHub, GitLab, Gitea, Bitbucket app passwords) are longer; 16 keeps the last 4 shown in the list
+// from being a large share of the secret.
+export const MIN_TOKEN = 16;
 
 export type GitAccountInput = { host: string; prefix: string; username: string; token: string; label: string };
 export type GitAccount = { id: string; host: string; prefix: string; username: string; label: string; last4: string; createdAt: number };
@@ -43,7 +46,7 @@ export function normalizePrefix(raw: unknown): string | null {
 export const defaultUsername = (host: string) => (host === "github.com" ? "x-access-token" : "oauth2");
 
 // Git's credential protocol is line based: a token with a newline or a NUL could inject extra fields.
-export const validToken = (t: unknown): t is string => typeof t === "string" && t.length > 0 && t.length <= MAX_TOKEN && !/[\u0000-\u001f\u007f]/.test(t);
+export const validToken = (t: unknown): t is string => typeof t === "string" && t.length >= MIN_TOKEN && t.length <= MAX_TOKEN && !/[\u0000-\u001f\u007f]/.test(t);
 
 export function validateAccount(input: unknown): { ok: true; value: GitAccountInput } | { ok: false; error: string } {
   if (!input || typeof input !== "object" || Array.isArray(input)) return { ok: false, error: "body must be a JSON object" };
@@ -55,20 +58,29 @@ export function validateAccount(input: unknown): { ok: true; value: GitAccountIn
   const username = typeof b.username === "string" && b.username.trim() ? b.username.trim() : defaultUsername(host);
   if (!USERNAME.test(username)) return { ok: false, error: "username: no spaces, = or control characters, up to 200 characters" };
   const token = typeof b.token === "string" ? b.token.trim() : b.token;
-  if (!validToken(token)) return { ok: false, error: `token: 1 to ${MAX_TOKEN} characters, no line breaks` };
+  if (!validToken(token)) return { ok: false, error: `token: ${MIN_TOKEN} to ${MAX_TOKEN} characters, no line breaks` };
   const label = typeof b.label === "string" && b.label.trim() ? b.label.trim() : prefix ? `${host}/${prefix}` : host;
   if (!LABEL.test(label)) return { ok: false, error: "label: up to 80 characters" };
   return { ok: true, value: { host, prefix, username, token, label } };
 }
 
-const segments = (p: string) => p.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "").split("/").filter(Boolean);
+// The path git sends (credential.useHttpPath), as segments; null for anything that is not a plain repository path.
+// git passes it raw, so "my-org/../other-org/repo.git" must not count as being under "my-org"; percent-encoding,
+// query, fragment, backslashes, empty, "." and ".." segments are all refused rather than interpreted.
+export function pathSegments(path: string | undefined): string[] | null {
+  if (path === undefined || path === "") return [];
+  if (/[%?#\\\u0000-\u001f\u007f]/.test(path) || path.length > 1024) return null;
+  const segs = path.replace(/^\//, "").replace(/\/$/, "").replace(/\.git$/, "").split("/");
+  if (segs.some((s) => s === "" || s === "." || s === "..")) return null;
+  return segs;
+}
 
 // Does an account prefix cover a repository path? "" covers everything; otherwise whole leading segments.
 export function prefixCovers(prefix: string, path: string | undefined): boolean {
+  const have = pathSegments(path);
+  if (have === null) return false;
   if (prefix === "") return true;
-  if (!path) return false;
   const want = prefix.split("/");
-  const have = segments(path);
   return want.length <= have.length && want.every((s, i) => s === have[i]);
 }
 
@@ -78,6 +90,8 @@ export function pickAccount<T extends { host: string; prefix: string }>(accounts
   if (q.protocol !== "https") return null;
   const host = normalizeHost(q.host);
   if (!host) return null;
+  // A path that is not plain matches nothing, not even an account without a prefix.
+  if (pathSegments(q.path) === null) return null;
   let best: T | null = null;
   let bestLen = -1;
   for (const a of accounts) {
@@ -108,8 +122,10 @@ export function setupGitTables(db: Database.Database) {
 
 type Row = { id: string; user_id: string; host: string; prefix: string; username: string; label: string; token_enc: string; last4: string; created_at: number };
 const toPublic = (r: Row): GitAccount => ({ id: r.id, host: r.host, prefix: r.prefix, username: r.username, label: r.label, last4: r.last4, createdAt: r.created_at });
-// The ciphertext is bound to its owner and row: copying token_enc to another row or user makes it undecryptable.
-const aadOf = (userId: string, id: string) => `git:${userId}:${id}`;
+// The ciphertext is bound to its owner, row, host, prefix and username: someone who can only write the database
+// cannot move a token to another user or row, or redirect it to another host or repository, without it failing to
+// decrypt.
+const aadOf = (r: Pick<Row, "user_id" | "id" | "host" | "prefix" | "username">) => JSON.stringify(["git-v1", r.user_id, r.id, r.host, r.prefix, r.username]);
 
 export class GitAccountError extends Error {
   readonly name = "GitAccountError";
@@ -128,7 +144,8 @@ export function gitAccountStore(db: Database.Database, key: () => Buffer) {
       if (!v.ok) throw new GitAccountError(v.error);
       const { host, prefix, username, token, label } = v.value;
       const id = randomBytes(12).toString("hex");
-      const row: Row = { id, user_id: userId, host, prefix, username, label, token_enc: seal(key(), token, aadOf(userId, id)), last4: token.slice(-4), created_at: now };
+      const row: Row = { id, user_id: userId, host, prefix, username, label, token_enc: "", last4: token.slice(-4), created_at: now };
+      row.token_enc = seal(key(), token, aadOf(row));
       db.transaction(() => {
         const existing = rows(userId);
         if (existing.length >= MAX_ACCOUNTS) throw new GitAccountError(`at most ${MAX_ACCOUNTS} accounts`);
@@ -140,12 +157,16 @@ export function gitAccountStore(db: Database.Database, key: () => Buffer) {
 
     remove: (userId: string, id: string): boolean => db.prepare("DELETE FROM git_accounts WHERE user_id = ? AND id = ?").run(userId, id).changes > 0,
 
+    // Offboarding (admin): every account of one user.
+    removeAll: (userId: string): number => db.prepare("DELETE FROM git_accounts WHERE user_id = ?").run(userId).changes,
+    count: (userId: string): number => (db.prepare("SELECT COUNT(*) AS n FROM git_accounts WHERE user_id = ?").get(userId) as { n: number }).n,
+
     // Only this user's accounts take part. A row that does not decrypt (other key, tampering) is treated as absent.
     credentialFor(userId: string, q: CredentialQuery): { account: string; username: string; password: string } | null {
       const row = pickAccount(rows(userId), q);
       if (!row) return null;
       try {
-        return { account: row.id, username: row.username, password: open(key(), row.token_enc, aadOf(userId, row.id)) };
+        return { account: row.id, username: row.username, password: open(key(), row.token_enc, aadOf(row)) };
       } catch {
         return null;
       }

@@ -201,7 +201,7 @@ function AccountsSection() {
           {t("A prefix limits the account to repositories under it (my-org/ → github.com/my-org/*); without one it covers every repository on the host. The most specific prefix wins. The token is shown only as its last 4 characters.")}
         </p>
         <div className="flex items-center gap-3">
-          <button onClick={add} disabled={busy || !host.trim() || !token.trim()} className={primary}>{busy ? "…" : t("Add")}</button>
+          <button onClick={add} disabled={busy || !host.trim() || token.trim().length < 16} className={primary}>{busy ? "…" : t("Add")}</button>
           {status && <span className={`text-sm ${status.ok ? "text-[var(--green)]" : "text-[var(--red)]"}`}>{status.text}</span>}
         </div>
       </div>

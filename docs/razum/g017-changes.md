@@ -4,10 +4,10 @@ title: G-017 pilot — SSO login, harness on demand, a network per user
 description: "What the razum/g017-pilot branch changes in Paddock, the env vars, how to run it, what was and was not verified, and which commits can go upstream as separate PRs."
 service: _platform
 status: active
-updated: 2026-10-29
+updated: 2026-10-30
 links:
   documents: [../../web/lib/oidc.ts, ../../web/lib/identity.ts, ../../web/lib/provision.ts, ../../provisioner, ../../docker-compose.provisioner.yml]
-  relates_to: [g017-mutation.md, g017-git-secrets.md, ../reference/architecture.md, ../services/provisioner/README.md]
+  relates_to: [g017-mutation.md, g017-git-secrets.md, g017-host-firewall.md, ../reference/architecture.md, ../services/provisioner/README.md]
 ---
 
 # G-017 pilot: SSO login, harness on demand, a network per user
@@ -61,6 +61,56 @@ the self-deploying web image.
    provider block is never overwritten. The NeuralDeep tab is unchanged. The provider's *other* models are not
    listed, because web cannot see the key (it lives only in the harness env).
 
+### Provisioner and per-user network fixes (branch `razum/g017-provision-fixes`)
+
+From an independent review ("enable with fixes"):
+
+- **H1, legacy ids.**
+  - The provisioner accepts only `^u-[0-9a-f]{12}$`. A legacy name gets 400 before Docker is touched.
+  - Web (`managedHarness` in `lib/provision.ts`) asks for or reports provisioning only for SSO ids. A legacy
+    (`add-user.sh`) harness is `unmanaged` everywhere, including the WS bridge's ECONNREFUSED path in `server.ts`.
+    A missing legacy container is therefore never recreated by the provisioner.
+- **M1, client address.**
+  - `server.ts` rewrites the forwarding headers of every request except `/api/harness/*`, which still refuses any
+    such header. Only peers in `TRUSTED_PROXIES` (loopback and the edge's static core address) keep their
+    `X-Forwarded-For`. Everyone else's `X-Forwarded-For`, `Forwarded`, `X-Real-IP`, `X-Forwarded-Host/Proto/Port`,
+    `X-Client-IP`, `True-Client-IP` and `CF-Connecting-IP` are dropped, and `X-Forwarded-For` becomes the TCP peer.
+  - better-auth's `trustedProxies` is now only `TRUSTED_PROXY_HOPS` (default none), instead of every private range.
+  - A harness can no longer rotate its "client address" past the sign-in rate limit; this is tested on the real
+    better-auth limiter.
+- **M2.** `DOCKER_API_VERSION` (default `v1.44`, validated) instead of a hard-coded `v1.43`.
+- **M4.**
+  - Harness logs: json-file, 3 × 10 MB. `MemorySwap` = memory. `HARNESS_PIDS_LIMIT` defaults to 512. Same in
+    `users/_template.yml`.
+  - Optional `MAX_HARNESSES`: a 409 pre-check on the request, then a serialised re-check, so concurrent first logins
+    cannot overshoot the cap.
+- **Fixed bridge names.**
+  - User networks get `pu<12 hex>`. Compose networks get `pd-core` (fixed subnet), `pd-out` and `pd-eapi`.
+  - The edge has a static core address (`PADDOCK_EDGE_IP`).
+  - A user network made before this change is kept and logged once as `WARNING … is not on bridge pu…`.
+- **Egress / host.**
+  - [gost.razum.yaml](gost.razum.yaml): a deny-list bypass with `resolver: public`, and the API as a service
+    admitted only from `egress-api`.
+  - [paddock-guard.nft](paddock-guard.nft) with its namespace test.
+  - The address pool, br_netfilter and the network switch procedure are in
+    [g017-host-firewall.md](g017-host-firewall.md).
+- **Tests added for the review's points:**
+  - P06: a body over 4 KB gets 413.
+  - P11: a container with a foreign `paddock.user` label is never started.
+  - P15: none of the reserved env vars can be overridden.
+- **Mutation testing of the new lines: 47 mutants, 45 killed.**
+  - Provisioner (20): id regexp, bridge name/option, swap, logs, pids default, API version (default, validation,
+    passed to the client), `MAX_HARNESSES` (validation, off-by-one, pre-check, serialisation, counting stopped and
+    only managed containers), the old-network warning, and the ownership label guard (P11).
+  - Web (27): `isProvisionedId`/`managedHarness`, both `server.ts` ensure sites, normalisation on HTTP/WS/harness
+    API, each dropped header, the trusted branch, `peerAddress`, `parseTrustList`, `ProxyTrust` resolve/refresh,
+    `trustedHops`, and better-auth's `trustedProxies`.
+  - Survivors Q09, Q16, Q17 and W26 got tests.
+  - Two survivors are equivalent:
+    - Q15: the re-inspect inside the serialised create is redundant because ensures are already de-duplicated per id.
+    - W27: the address-family guard in `isTrusted` is redundant because `BlockList.check` returns false for
+      non-addresses.
+
 ## Env vars
 
 | where | var | default | meaning |
@@ -80,11 +130,17 @@ the self-deploying web image.
 | web | `SELF_DEPLOY` | `1` | `0` = the supervisor ignores deploy requests |
 | web | `NODE_USE_ENV_PROXY` | — | set to `1` if the IdP is reachable only through egress (Node 22 fetch then honours `HTTPS_PROXY`; harness connections are excluded) |
 | provisioner | `PROVISIONER_TOKEN` | — (required) | |
-| provisioner | `HARNESS_IMAGE`, `HARNESS_MEMORY`, `HARNESS_CPUS`, `HARNESS_PIDS_LIMIT` | `paddock-harness-codex`, `4g`, `2`, `1024` | |
+| web | `TRUSTED_PROXIES` | `127.0.0.1,::1,edge` (override: `127.0.0.1,::1,${PADDOCK_EDGE_IP}`) | peers whose `X-Forwarded-For` is kept (IPs, CIDRs, host names re-resolved every 60 s); everyone else's forwarding headers are replaced by the TCP peer |
+| web | `TRUSTED_PROXY_HOPS` | empty | IPs/CIDRs of proxies in front of the edge (e.g. a TLS front), skipped by better-auth inside `X-Forwarded-For` |
+| provisioner | `HARNESS_IMAGE`, `HARNESS_MEMORY`, `HARNESS_CPUS`, `HARNESS_PIDS_LIMIT` | `paddock-harness-codex`, `4g`, `2`, `512` | swap = memory (none extra); json-file logs 3 × 10 MB |
+| provisioner | `MAX_HARNESSES` | `0` (no cap) | a new harness beyond N managed containers gets 409 |
+| provisioner | `DOCKER_API_VERSION` | `v1.44` | Engine API version used in request paths |
 | provisioner | `TOKENS_DIR`, `HOST_TOKENS_DIR`, `USER_ENV_DIR`, `WEB_CONTAINER`, `EGRESS_CONTAINER`, `RECONCILE_INTERVAL_MS`, `PULL_MISSING_IMAGE` | see `docs/services/provisioner/README.md` | |
 | provisioner | `LLM_PROVIDER_NAME`, `LLM_PROVIDER_LABEL`, `LLM_BASE_URL`, `LLM_WIRE_API` (`responses`), `LLM_DEFAULT_MODEL`, `LLM_API_KEY_ENV` (`LLM_API_KEY`) | — | seed `[model_providers.<name>]` with `env_key` |
 | provisioner | `MCP_SERVERS_JSON` | — | `[{"id","url","bearer_env"}]` → `[mcp_servers.<id>] url, bearer_token_env_var` |
-| compose | `PADDOCK_EGRESS_API_SUBNET` | `10.254.254.0/29` | |
+| compose | `PADDOCK_EGRESS_API_SUBNET` | `10.254.254.0/29` | must match the API admission in the gost config |
+| compose | `PADDOCK_CORE_SUBNET` / `PADDOCK_OUTSIDE_SUBNET` | `172.20.1.0/24` / `172.20.2.0/24` | bridges `pd-core` / `pd-out` (egress-api: `pd-eapi`) |
+| compose | `PADDOCK_EDGE_IP` | `172.20.1.250` | the edge's static address on core, trusted by web |
 
 **Redirect URI to register at the IdP:** `${PUBLIC_URL}/api/auth/callback/oidc`. better-auth 1.7 routes generic
 OAuth providers through the core `/callback/:id` endpoint (verified in the mock-IdP run below). Post-logout: none,
@@ -112,7 +168,7 @@ Without any `users/*.yml` the base compose file still works; `add-user.sh` users
 
 - `cd web && npx tsc --noEmit -p . && node scripts/check-i18n.mjs && npx next build` passes. The build logs
   "Database schema mismatch" during page-data collection on an empty database; upstream `e7bd2d6` logs the same.
-- Unit tests: `web` 23 (`npm test`), `provisioner` 29 (`npm test`, including server.mjs against a fake Docker Engine API
+- Unit tests (as of the provision fixes): `web` 150 (`npm test`), `provisioner` 41 (`npm test`, including server.mjs against a fake Docker Engine API
   on a unix socket: auth, validation, idempotency, concurrency, missing image, reconcile, recreate).
 - Mutation testing: see [g017-mutation.md](g017-mutation.md).
 - **OIDC end to end against a mock IdP** (local HTTP server with discovery, JWKS, RS256 id_tokens, PKCE check,
@@ -140,13 +196,13 @@ Without any `users/*.yml` the base compose file still works; `add-user.sh` users
   the token endpoint auth method (better-auth defaults to `client_secret_post`; set `tokenEndpointAuth` in
   `lib/oidc.ts` if the IdP wants basic), and the `email_verified` semantics.
 - Any Docker behaviour: image builds (`provisioner/Dockerfile`, `web/Dockerfile.prod`), the provisioner against a real
-  Engine API (API version `v1.43` is hard-coded in `provisioner/docker.mjs`), and whether bind mounts of token files
+  Engine API (API version `DOCKER_API_VERSION`, default `v1.44`; prod Engine 29.x accepts 1.40–1.56), and whether bind mounts of token files
   work with the host path discovered from the provisioner's own mount. Also that internal networks really isolate
   harnesses from each other through the shared web/egress, `DAC_OVERRIDE` being enough to write tokens into a
   host-owned `secrets/tokens`, and the reconcile loop after `docker compose up`.
-- gost: `gost.example.yaml` was not run; the docker sandbox here had no daemon and downloading the gost binary was
-  not permitted. The bypass is matched before DNS, so a public name resolving to a private address (DNS rebinding)
-  is not caught.
+- gost: neither `gost.example.yaml` nor `gost.razum.yaml` was run (no Docker daemon; building gost was not
+  permitted). Both were checked against the gost 3.3.2 source: the bypass is matched before DNS and resolved addresses
+  are never re-checked, so DNS rebinding is left to the host firewall ([g017-host-firewall.md](g017-host-firewall.md)).
 - An LLM behind the seeded provider (that Codex reaches it with the key from `env_key`), and MCP seeding.
 - The UI overlay and the login page in a real browser (only typechecked, i18n-checked and built; `tests/*.mjs` need a
   running instance and were not run).
@@ -158,9 +214,9 @@ Without any `users/*.yml` the base compose file still works; `add-user.sh` users
 - Admin rights from `OIDC_ADMIN_GROUPS` are taken from the last login and stay valid for the session lifetime
   (30 days) unless the user logs in again or is removed from the allowed groups.
 - The egress proxy port is shared by all users (web and egress sit on every user network). Without a bypass for
-  private targets, it is a bridge between user networks (harnesses still require their own token). The gost API is
-  password-only unless the hardened variant is used. Probe ports (`:18100+`, only when a proxy chain is configured)
-  have no bypass.
+  private targets, it is a bridge between user networks (harnesses still require their own token). `gost.razum.yaml`
+  refuses private targets and container names, and admits the gost API only from `egress-api`; the host rules close
+  rebinding and intra-bridge ports. Probe ports (`:18100+`, only when a proxy chain is configured) have no bypass.
 - Web's HTTP port is reachable from every harness (same as from the browser: cookie session and Origin checks).
 - With `PROVISIONER_URL` set, the admin's `add-user.sh --admin` source mount is not reproduced by the provisioner.
 
@@ -180,5 +236,10 @@ Without any `users/*.yml` the base compose file still works; `add-user.sh` users
 | d41b952 | egress example config | PR 6 (independent, docs only; verify on a real gost first) |
 | 63984cc | `web/Dockerfile.prod` and `SELF_DEPLOY=0` | PR 7 (independent) |
 | 39a5664 | provider from `config.toml` shown as active | PR 8 (independent) |
+| 54c5aa3 | provisioner: SSO ids only, `pu<hex>` bridges, `DOCKER_API_VERSION`, bounded logs/swap/pids, `MAX_HARNESSES` | squash into PR 3 |
+| 1632678 | web: provision only SSO harnesses; client address from the TCP peer unless it is the edge | PR 4 (provisioning part); the client-address part is an independent PR (any deployment with an edge) |
+| 7845cbc | compose: fixed bridge names, core subnet, static edge address | PR 4 or 5 |
+| d8c5b79, 68d185f | provisioner: warning for pre-change networks; README; tests | squash into PR 3 |
+| a54b3a4 | `docs/razum`: gost config, nft rules, firewall runbook | fork only |
 
 None of the commits contain company names, domains or secrets. `docs/razum/` is fork-only and should not go upstream.

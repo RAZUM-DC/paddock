@@ -75,6 +75,7 @@ only when `config.toml` does not exist yet; later edits (Settings → Codex) are
 | `PROVISIONER_CONTAINER` | `paddock-provisioner` | its own name, to find the host path above |
 | `WEB_CONTAINER` / `EGRESS_CONTAINER` | `paddock-web` / `paddock-egress` | |
 | `WEB_ALIAS` | `web` | web's name on user networks |
+| `EGRESS_MAC` | `02:00:00:00:00:e1` | egress's MAC on every user network, so a host firewall can drop connections egress opens there (DNS rebinding through the proxy); `""` = Docker's own. An egress attached with another MAC is reconnected once |
 | `WEB_PORT` | `3000` | web's port, for the harness's `PADDOCK_WEB_URL` |
 | `HARNESS_MEMORY` / `HARNESS_CPUS` / `HARNESS_PIDS_LIMIT` | `4g` / `2` / `512` | swap is set equal to memory (no swap) |
 | `MAX_HARNESSES` | `0` (no cap) | cap on managed harness containers; a new one beyond it gets 409 |

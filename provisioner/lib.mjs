@@ -82,6 +82,9 @@ export function configFromEnv(env) {
     egressContainer: env.EGRESS_CONTAINER || "paddock-egress",
     egressAlias: env.EGRESS_ALIAS || "egress",
     egressPort: int(env.EGRESS_PORT, 8080, 1, 65535),
+    // Fixed MAC of egress on every user network, so the host firewall can drop connections egress opens there
+    // (DNS rebinding through the proxy). Empty = Docker's own MAC.
+    egressMac: (env.EGRESS_MAC ?? "02:00:00:00:00:e1").toLowerCase(),
     memory: parseMemory(env.HARNESS_MEMORY ?? "4g"),
     nanoCpus: Math.round((Number(env.HARNESS_CPUS) > 0 && Number(env.HARNESS_CPUS) <= 256 ? Number(env.HARNESS_CPUS) : 2) * 1e9),
     pidsLimit: int(env.HARNESS_PIDS_LIMIT, 512, 16, 1_000_000),
@@ -94,6 +97,7 @@ export function configFromEnv(env) {
   if (cfg.token.length < 16) errors.push("PROVISIONER_TOKEN must be set (16+ characters)");
   if (!/^v1\.\d{2}$/.test(cfg.dockerApiVersion)) errors.push(`DOCKER_API_VERSION "${cfg.dockerApiVersion}": expected v1.NN (e.g. v1.44)`);
   if (env.MAX_HARNESSES !== undefined && env.MAX_HARNESSES !== "" && !/^\d+$/.test(env.MAX_HARNESSES)) errors.push("MAX_HARNESSES must be a whole number (0 = no limit)");
+  if (cfg.egressMac && !/^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/.test(cfg.egressMac)) errors.push(`EGRESS_MAC "${cfg.egressMac}": expected xx:xx:xx:xx:xx:xx or empty`);
   if (cfg.hostTokensDir && !cfg.hostTokensDir.startsWith("/")) errors.push("HOST_TOKENS_DIR must be an absolute path on the host");
 
   if (env.LLM_PROVIDER_NAME) {
@@ -202,7 +206,13 @@ export function networkCreateBody(id) {
   };
 }
 
-export const networkConnectBody = (container, aliases = []) => ({ Container: container, EndpointConfig: { Aliases: aliases } });
+export const networkConnectBody = (container, aliases = [], mac = "") => ({ Container: container, EndpointConfig: { Aliases: aliases, ...(mac ? { MacAddress: mac } : {}) } });
+
+// Is a container on a network with a MAC other than the wanted one? ("" = no wish; not attached = nothing to fix.)
+export function wrongMac(containerInspect, network, mac) {
+  const ep = containerInspect?.NetworkSettings?.Networks?.[network];
+  return Boolean(mac && ep && String(ep.MacAddress ?? "").toLowerCase() !== mac);
+}
 
 // Is a container that is already on a network missing one of the aliases it should have there? (Docker keeps the
 // aliases of the connect call; a container attached before an alias was introduced has to be reconnected.)

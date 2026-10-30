@@ -71,6 +71,10 @@ No other new variables. TOTP: SHA-1, 6 digits, 30 s, ±1 step (like better-auth)
 - **Log:** every lock writes one JSON line `{"event":"second-factor-lock","user":…,"locks":n,"hard":…,"until":…}` (no
   codes, no secrets).
 - **Reset:** a success resets the counters and the lock history.
+- **Backup codes during a lock:** while a user is locked (soft or hard), TOTP codes are refused but **backup codes
+  still work**, on their own counter: 5 attempts per hour per user, and the session cap still applies. A success
+  clears the lock, so the owner can recover without an admin. An attacker guessing backup codes (10 random
+  alphanumeric codes of 10 characters) gets 5 tries per hour against about 8·10¹⁷ possible codes per code.
 - **Rate limit:** better-auth adds 20 requests/min per client address on `/second-factor/*`.
 
 **Residual guessing rate.** Each attempt hits one of 3 valid codes (±1 step) out of 10⁶, so p = 3·10⁻⁶.
@@ -127,10 +131,12 @@ every 10 minutes.
 - **Disabling TOTP**: refused (`403 TOTP_REQUIRED_FOR_SSO`) for any user with an OIDC account while
   `OIDC_REQUIRE_TOTP` is on, whatever the session. Otherwise the next SSO login would simply enrol again, and a stolen
   verified session could remove the second factor. "Settings → Paddock login" then shows an error on "disable".
-  **Unlinking the SSO account** (`/unlink-account` with the OIDC provider) is refused for every session
-  (`403 SSO_ACCOUNT_REQUIRED`, review F4). Without this, a linked user could unlink and then disable. The rule chosen
-  is "has an OIDC account", not "has a TOTP Paddock created": better-auth's `twoFactor` row does not record who created
-  it, and for SSO users TOTP is the policy whoever enrolled it.
+  **Unlinking accounts** is refused for every session of a user who has an SSO account (`403 SSO_ACCOUNT_REQUIRED`,
+  review F4). better-auth 1.7's `/unlink-account` takes only `{ accountId }`, so the SSO account cannot be singled
+  out from the request body: a first fix that looked at `providerId` was bypassable. Without this rule, a linked user
+  could unlink and then disable. The rule chosen is "has an OIDC account", not "has a TOTP Paddock created":
+  better-auth's `twoFactor` row does not record who created it, and for SSO users TOTP is the policy whoever enrolled
+  it.
 - **Lost phone / reset** (admin, on the server; the user then enrols again at the next SSO login):
   `sqlite3 data/auth.db "DELETE FROM twoFactor WHERE userId = '<id>'; UPDATE user SET twoFactorEnabled = 0 WHERE id = '<id>';"`
   Backup codes cover the usual case without an admin.
@@ -166,6 +172,14 @@ every 10 minutes.
 
 - `cd web && npx tsc --noEmit -p . && node scripts/check-i18n.mjs && npx next build`: pass. `npm test` in `web`:
   135/135; `provisioner`: 32/32. Every commit of the branch passes on its own.
+- **After the re-review**:
+  - unlinking with `{ accountId }` only → 403 and the account remains;
+  - `twoFactorEnabled` is set in the success transaction (a unit test shows the rollback when it can't be set);
+  - user A's verified cookie plus an id_token sign-in of user B → B's session is pending
+    (`/sign-in/social` sessions are now classified pending, and `inheritedState` is unit-tested);
+  - backup codes during locks (above).
+
+  `npm test`: 139/139.
 - **After the review**, all in `test/oidc-totp.test.mjs` unless noted:
   - A walk over **every** better-auth endpoint gives 403 `SECOND_FACTOR_REQUIRED` for a pending session, except the
     explicit allow-list. The requests carry a body/query that passes each endpoint's input validation, so they reach
@@ -191,7 +205,8 @@ every 10 minutes.
     - a success resets the user counter;
     - locks grow 15 → 30 min and are logged (keys checked, no secret in the log);
     - a hard lock refuses even the right code (`LOCKED_HARD`) until the row is deleted;
-    - the 5th failure itself deletes the session;
+    - the 5th failure itself deletes the session; backup codes work during soft and hard locks on their own limit
+      (5/hour) and clear the lock, while TOTP stays locked;
     - a session whose attempts are used up is revoked by its next request;
     - change-password keeps a verified session verified.
   - `test/oidc-totp-prod.test.mjs` (`NODE_ENV=production`): a foreign, missing or look-alike Origin on enrol/verify →
@@ -409,6 +424,28 @@ Reviewer's set:
 | M19 | lock checked per session instead of per user | killed | lockout: 5 wrong codes revoke the session; 10 across sessions lock the user even for the right code |
 | M20 | disable refused only while pending | killed | first enrolment: otpauth URI, stored like better-auth's twoFactor, then a new verified session |
 
+Re-review set (V1–V14, on 467a1fe with the V9 test fix): **14 mutations, 14 killed** (V9 after a test fix; V3 was
+first written as a syntax error and replaced by a valid one). They supersede T25 → V7, T31 → V2, U11 → V1,
+U20 → V4, U21 → V5 and the reviewer's M8 → V14, whose lines moved. All other T/U/M mutations target lines unchanged
+since the full run on 10d14a4.
+
+| # | file | mutation | result | first test that failed |
+|---|---|---|---|---|
+| V1 | `web/lib/second-factor.ts` | unlink refused only when the body names the SSO provider (the bypass) | killed | an SSO user cannot unlink any account (better-auth takes only accountId), so TOTP stays required |
+| V2 | `web/lib/second-factor-core.ts` | user flag not set in the success transaction | killed | first enrolment: otpauth URI, stored like better-auth's twoFactor, then a new verified session |
+| V3 | `web/lib/second-factor-core.ts` | user flag failure does not roll back | killed | consumeSuccess: one winner, nothing half-done |
+| V4 | `web/lib/second-factor-core.ts` | rotation inherits another user's state (the N9 guard) | killed | inheritedState: same user only, verified/exempt only |
+| V5 | `web/lib/second-factor-core.ts` | rotation inherits a pending state | killed | inheritedState: same user only, verified/exempt only |
+| V6 | `web/lib/second-factor-core.ts` | backup codes refused during a lock | killed | backup codes work during a soft or hard lock (own counter, 5 per hour) and clear it; TOTP codes stay locked |
+| V7 | `web/lib/second-factor-core.ts` | TOTP codes allowed during a lock | killed | lockout: 5 wrong codes revoke the session; 10 across sessions lock the user even for the right code |
+| V8 | `web/lib/second-factor-core.ts` | no limit on backup attempts during a lock | killed | backup codes work during a soft or hard lock (own counter, 5 per hour) and clear it; TOTP codes stay locked |
+| V9 | `web/lib/second-factor-core.ts` | backup counter window never restarts | killed | beginAttempt while locked: … (**survived first**, test fixed: the soft lock had expired before the next-hour check) |
+| V10 | `web/lib/second-factor-core.ts` | backup attempt during a lock skips the session cap | killed | beginAttempt while locked: TOTP refused, backup codes on their own counter (5 per hour), session cap still applies |
+| V11 | `web/lib/second-factor-core.ts` | backup counter not reset by a success | killed | backup codes work during a soft or hard lock (own counter, 5 per hour) and clear it; TOTP codes stay locked |
+| V12 | `web/lib/second-factor-core.ts` | id_token sign-in sessions not marked pending (default-deny remains) | killed | a verified session of user A plus an id_token sign-in of user B gives B a pending session, never A's state |
+| V13 | `web/lib/second-factor.ts` | backup attempt flag derived wrongly (every code treated as TOTP) | killed | backup codes work during a soft or hard lock (own counter, 5 per hour) and clear it; TOTP codes stay locked |
+| V14 | `web/lib/second-factor.ts` | rotated sessions do not inherit verified/exempt (reviewer's M8 on the new code) | killed | a verified or exempt session rotated by another endpoint (change-password) keeps its state |
+
 ## Review findings (2026-10-30) and what was done
 
 | # | finding | fix |
@@ -419,6 +456,10 @@ Reviewer's set:
 | F4 (Low) | SSO account could be unlinked, then TOTP disabled | `/unlink-account` of the SSO provider refused for any session; disable refused for users with an SSO account (decision above) |
 | F5 | Origin in production; concurrent first enrols | production-mode test (foreign/missing/look-alike Origin → 403); enrolment in a transaction, one row |
 | — | rotated sessions lost their verified state (found by M8) | gate records the request's session state; the session hook inherits it for the same user |
+| F4 (re-review) | `/unlink-account` takes only `{accountId}`, so the `providerId` check was bypassable | any unlink refused for a user with an SSO account; test without `providerId` |
+| R2 | `twoFactorEnabled` set after the transaction | set inside `consumeSuccess`; rollback tested |
+| R3 | rotation guard `prev.userId === session.userId` untested | `inheritedState` pure and unit-tested; A's verified cookie + B's id_token sign-in → B pending; `/sign-in/social` sessions classified pending |
+| R4 | a locked owner needed an admin | backup codes work during soft/hard locks on their own counter (5/hour), TOTP stays locked; tests |
 
 ## Upstream
 

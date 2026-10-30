@@ -71,7 +71,7 @@ services:
     container_name: paddock-egress
     networks:
       # Static, so the host firewall can drop connections egress opens on core (DNS rebinding through the proxy to
-      # a core address, e.g. <core ip>.nip.io); EGRESS_MAC does the same on user networks (provisioner).
+      # a core address, e.g. <core ip>.nip.io); its MACs on user networks are learned by the host.
       core:
         ipv4_address: ${PADDOCK_EGRESS_IP:-172.20.1.251}
       outside: {}

@@ -8,12 +8,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 function fakeDocker(sock, tokensDir) {
-  const state = { networks: new Map(), volumes: new Map(), containers: new Map(), images: new Set(["paddock-harness-codex"]), calls: [] };
+  const state = { networks: new Map(), volumes: new Map(), containers: new Map(), images: new Set(["paddock-harness-codex"]), calls: [], versions: new Set() };
   const srv = createServer(async (req, res) => {
     let body = "";
     for await (const c of req) body += c;
     const url = new URL(req.url, "http://d");
     const path = url.pathname.replace(/^\/v[\d.]+/, "");
+    state.versions.add(/^\/(v[\d.]+)\//.exec(url.pathname)?.[1] ?? "none");
     state.calls.push(`${req.method} ${path}`);
     const json = (code, v) => { res.writeHead(code, { "content-type": "application/json" }); res.end(v === undefined ? "" : JSON.stringify(v)); };
     const b = body ? JSON.parse(body) : null;
@@ -54,7 +55,8 @@ function fakeDocker(sock, tokensDir) {
     }
     if (req.method === "GET" && path === "/containers/json") {
       const want = JSON.parse(url.searchParams.get("filters") ?? "{}").label ?? [];
-      return json(200, [...state.containers.values()].filter((c) => want.every((l) => { const [k, v] = l.split("="); return c.Config?.Labels?.[k] === v; })).map((c) => ({ Names: [`/${c.Name}`], Labels: c.Config?.Labels })));
+      const all = url.searchParams.get("all") === "1" || url.searchParams.get("all") === "true";
+      return json(200, [...state.containers.values()].filter((c) => all || c.State?.Running).filter((c) => want.every((l) => { const [k, v] = l.split("="); return c.Config?.Labels?.[k] === v; })).map((c) => ({ Names: [`/${c.Name}`], Labels: c.Config?.Labels })));
     }
     if (req.method === "POST" && path === "/containers/create") {
       const name = url.searchParams.get("name");
@@ -325,6 +327,35 @@ test("a user network made before fixed bridge names is kept and reported once", 
     await p.call("POST", "/harness/ensure", { id: V });
     await waitReady(p.call, V);
     assert.doesNotMatch(p.out(), new RegExp(`${V}: WARNING`));
+  } finally { p.stop(); }
+});
+
+test("DOCKER_API_VERSION is the version in every Engine API path (default v1.44)", async () => {
+  for (const [env, want] of [[{}, "v1.44"], [{ DOCKER_API_VERSION: "v1.47" }, "v1.47"]]) {
+    const p = await start(env);
+    try {
+      await p.call("POST", "/harness/ensure", { id: "u-0000000000ee" });
+      await waitReady(p.call, "u-0000000000ee");
+      assert.deepEqual([...p.state.versions], [want]);
+    } finally { p.stop(); }
+  }
+});
+
+test("MAX_HARNESSES counts managed containers, stopped ones too, and nothing else", async () => {
+  const managed = { "paddock.user": "u-0000000000f1", "paddock.managed-by": "paddock-provisioner" };
+  // An unmanaged container (e.g. a legacy harness) does not use up the cap.
+  let p = await start({ MAX_HARNESSES: "1" });
+  try {
+    p.state.containers.set("harness-legacy", { Name: "harness-legacy", Config: { Labels: { "paddock.user": "legacy" } }, State: { Running: true, Status: "running" } });
+    assert.equal((await p.call("POST", "/harness/ensure", { id: "u-0000000000f2" })).status, 202);
+    await waitReady(p.call, "u-0000000000f2");
+  } finally { p.stop(); }
+  // A stopped managed harness still counts.
+  p = await start({ MAX_HARNESSES: "1" });
+  try {
+    p.state.containers.set("harness-u-0000000000f1", { Name: "harness-u-0000000000f1", Config: { Labels: managed }, State: { Running: false, Status: "exited" } });
+    assert.equal((await p.call("POST", "/harness/ensure", { id: "u-0000000000f2" })).status, 409);
+    assert.equal(p.state.containers.has("harness-u-0000000000f2"), false);
   } finally { p.stop(); }
 });
 

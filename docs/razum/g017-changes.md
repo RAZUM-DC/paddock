@@ -7,7 +7,7 @@ status: active
 updated: 2026-10-29
 links:
   documents: [../../web/lib/oidc.ts, ../../web/lib/identity.ts, ../../web/lib/provision.ts, ../../provisioner, ../../docker-compose.provisioner.yml]
-  relates_to: [g017-mutation.md, ../reference/architecture.md, ../services/provisioner/README.md]
+  relates_to: [g017-mutation.md, g017-git-secrets.md, ../reference/architecture.md, ../services/provisioner/README.md]
 ---
 
 # G-017 pilot: SSO login, harness on demand, a network per user

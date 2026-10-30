@@ -102,10 +102,13 @@ From an independent review ("enable with fixes"):
 - **After the production rollout:**
   - `control` gets a fixed subnet.
   - The gost API moves back to the top-level `api:`.
-  - Egress's own connections on internal bridges are dropped: a static core IP, plus a fixed MAC that the
-    provisioner sets on user networks and reconnects once. This closed DNS rebinding to a legacy harness on core.
-    The same hole existed on user bridges and is closed the same way.
-- **Mutation testing of the new lines: 54 mutants, 52 killed** (including 7 for `EGRESS_MAC`).
+  - Egress's own connections on internal bridges are dropped: a static core IP, plus its MACs on user networks.
+    This closed DNS rebinding to a legacy harness on core. The same hole existed on user bridges and is closed the
+    same way.
+  - The MACs are learned by the host: an nft set `egress_macs`, filled by `paddock-guard-egress-sync.sh` on
+    egress's connect events and every minute. A fixed `EGRESS_MAC` set by the provisioner was tried and dropped,
+    because Docker 29 ignores `MacAddress` on a network connect of a running container.
+- **Mutation testing of the new lines: 47 mutants, 45 killed** (the 7 `EGRESS_MAC` mutants went with the feature).
   - Provisioner (20): id regexp, bridge name/option, swap, logs, pids default, API version (default, validation,
     passed to the client), `MAX_HARNESSES` (validation, off-by-one, pre-check, serialisation, counting stopped and
     only managed containers), the old-network warning, and the ownership label guard (P11).
@@ -148,7 +151,7 @@ From an independent review ("enable with fixes"):
 | compose | `PADDOCK_EGRESS_API_SUBNET` | `10.254.254.0/29` | web ↔ gost API (bridge `pd-eapi`) |
 | compose | `PADDOCK_CONTROL_SUBNET` | `172.20.9.0/24` | web ↔ provisioner; every compose network has a fixed subnet (a pooled one can collide with a parallel create: "Pool overlaps") |
 | compose | `PADDOCK_EGRESS_IP` | `172.20.1.251` | egress's static core address; `EGRESS_CORE_IP` in paddock-guard.nft |
-| provisioner | `EGRESS_MAC` | `02:00:00:00:00:e1` | egress's MAC on every user network (`""` = Docker's); `EGRESS_MAC` in paddock-guard.nft |
+| host | `EGRESS_CONTAINER`, `NETWORK_PREFIX`, `NFT_TABLE` | `paddock-egress`, `paddock-u-`, `inet paddock_guard` | for `paddock-guard-egress-sync.sh` |
 | compose | `PADDOCK_CORE_SUBNET` / `PADDOCK_OUTSIDE_SUBNET` | `172.20.1.0/24` / `172.20.2.0/24` | bridges `pd-core` / `pd-out` (egress-api: `pd-eapi`) |
 | compose | `PADDOCK_EDGE_IP` | `172.20.1.250` | the edge's static address on core, trusted by web |
 
@@ -178,7 +181,7 @@ Without any `users/*.yml` the base compose file still works; `add-user.sh` users
 
 - `cd web && npx tsc --noEmit -p . && node scripts/check-i18n.mjs && npx next build` passes. The build logs
   "Database schema mismatch" during page-data collection on an empty database; upstream `e7bd2d6` logs the same.
-- Unit tests (as of the provision fixes): `web` 150 (`npm test`), `provisioner` 43 (`npm test`, including server.mjs against a fake Docker Engine API
+- Unit tests (as of the provision fixes): `web` 150 (`npm test`), `provisioner` 41 (`npm test`, including server.mjs against a fake Docker Engine API
   on a unix socket: auth, validation, idempotency, concurrency, missing image, reconcile, recreate).
 - Mutation testing: see [g017-mutation.md](g017-mutation.md).
 - **OIDC end to end against a mock IdP** (local HTTP server with discovery, JWKS, RS256 id_tokens, PKCE check,

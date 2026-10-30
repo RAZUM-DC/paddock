@@ -20,7 +20,7 @@ What the containers cannot enforce themselves, enforced on the host. Applies to
 | `pd-out` | `paddock_outside` | edge, egress | yes (the only one) |
 | `pd-core` | `paddock_core` | web, edge (static `PADDOCK_EDGE_IP`, default 172.20.1.250), egress (static `PADDOCK_EGRESS_IP`, default 172.20.1.251), other core services, legacy harnesses | no (internal) |
 | `pd-eapi` | `paddock_egress-api` | web, egress (alias `egress-api`) | no (internal) |
-| `pu<12 hex>` | `paddock-u-u-<12 hex>` | `harness-u-<hex>`, web (alias `web`), egress (alias `egress`, fixed MAC `EGRESS_MAC`, default 02:00:00:00:00:e1, set by the provisioner) | no (internal) |
+| `pu<12 hex>` | `paddock-u-u-<12 hex>` | `harness-u-<hex>`, web (alias `web`), egress (alias `egress`; its MACs here are synced into the nft set `egress_macs`) | no (internal) |
 | — | `paddock_control` | web, provisioner (fixed subnet `PADDOCK_CONTROL_SUBNET`, default 172.20.9.0/24) | no (internal) |
 
 ## 1. Rules: `paddock-guard.nft`
@@ -33,7 +33,7 @@ final, and an `accept` in this table does not skip Docker's own chains.
 | # | chain | match (new connections only; replies and established flows pass) | needs br_netfilter |
 |---|---|---|---|
 | 1 | forward | from `pd-out` to 10/8, 172.16/12, 192.168/16, 100.64/10, 169.254/16 (and fc00::/7, fe80::/10) → drop, except `outside_allow4` | no (routed) |
-| 2 | forward | `pu*` → `pu*` (between members of a user bridge): drop anything egress opens (`ether saddr $EGRESS_MAC`); allow tcp 3000 (web), 4500 (harness), 8080 (egress proxy); drop everything else, including tcp 18080 (gost API) | **yes** |
+| 2 | forward | `pu*` → `pu*` (between members of a user bridge): drop anything egress opens (`ether saddr @egress_macs`); allow tcp 3000 (web), 4500 (harness), 8080 (egress proxy); drop everything else, including tcp 18080 (gost API) | **yes** |
 | 3 | forward | `pd-core` → `pd-core`: drop anything egress opens (`ip saddr $EGRESS_CORE_IP`) and tcp 18080. `pd-out` → `pd-out`: drop tcp 18080. `pd-eapi` → `pd-eapi`: only tcp 18080 (web → gost API) | **yes** |
 | 4 | input | from `pd-*`, `pu*`, `docker0`, `br-*` to the host itself → drop | no |
 
@@ -42,8 +42,9 @@ Install (as root):
 ```bash
 install -d /etc/nftables.d
 install -m 600 docs/razum/paddock-guard.nft /etc/nftables.d/paddock-guard.nft
+install -m 755 docs/razum/paddock-guard-egress-sync.sh /usr/local/sbin/paddock-guard-egress-sync.sh
 nft -c -f /etc/nftables.d/paddock-guard.nft          # syntax check only
-nft -f /etc/nftables.d/paddock-guard.nft             # load; re-running replaces just this table
+nft -f /etc/nftables.d/paddock-guard.nft && paddock-guard-egress-sync.sh   # load (replaces just this table) + fill egress_macs
 nft list table inet paddock_guard
 ```
 
@@ -60,13 +61,51 @@ Before=docker.service
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/sbin/nft -f /etc/nftables.d/paddock-guard.nft
+# Loading the file empties egress_macs: refill it (fails harmlessly at boot, before Docker; the watcher fills it then).
+ExecStartPost=-/usr/local/sbin/paddock-guard-egress-sync.sh
 ExecReload=/usr/sbin/nft -f /etc/nftables.d/paddock-guard.nft
+ExecReload=-/usr/local/sbin/paddock-guard-egress-sync.sh
 ExecStop=/usr/sbin/nft delete table inet paddock_guard
 [Install]
 WantedBy=multi-user.target
 ```
 
-`systemctl daemon-reload && systemctl enable --now paddock-guard`. Do **not** include the file from a stock
+```ini
+# /etc/systemd/system/paddock-guard-egress-watch.service — re-sync egress_macs on every network connect of egress
+[Unit]
+Description=Paddock: keep nft egress_macs in sync with the egress container
+After=docker.service paddock-guard.service
+Requires=docker.service
+PartOf=paddock-guard.service
+[Service]
+ExecStart=/usr/local/sbin/paddock-guard-egress-sync.sh watch
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
+
+# /etc/systemd/system/paddock-guard-egress-sync.service — one sync (fallback, from the timer)
+[Unit]
+Description=Paddock: sync nft egress_macs once
+After=docker.service paddock-guard.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/paddock-guard-egress-sync.sh
+
+# /etc/systemd/system/paddock-guard-egress-sync.timer
+[Unit]
+Description=Paddock: sync nft egress_macs every minute
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+[Install]
+WantedBy=timers.target
+```
+
+`systemctl daemon-reload && systemctl enable --now paddock-guard paddock-guard-egress-watch paddock-guard-egress-sync.timer`.
+After editing the rules, use `systemctl reload paddock-guard` (it re-syncs at once) or `restart` (which also
+restarts the watcher, via `PartOf=`). A bare `nft -f` leaves `egress_macs` empty until the next timer tick (≤ 1 min). Check with `nft list set inet paddock_guard egress_macs`: one MAC per `paddock-u-*` network of egress, the
+same as `docker inspect -f '{{range $n, $e := .NetworkSettings.Networks}}{{$n}} {{$e.MacAddress}}{{"\n"}}{{end}}' paddock-egress`. Do **not** include the file from a stock
 `/etc/nftables.conf` that starts with `flush ruleset`. `systemctl restart nftables` would then also wipe Docker's rules.
 If that ever happens: `systemctl restart docker paddock-guard`.
 
@@ -80,8 +119,7 @@ nft add element inet paddock_guard outside_allow4 '{ 10.30.0.2 . 53 }'   # examp
 The gost config in `gost.razum.yaml` resolves through **public** nameservers, so egress normally needs no exception. If
 the proxy chain points at an upstream proxy in a private range, add that `ip . port` here.
 
-**Keep in sync:** `define EGRESS_CORE_IP` at the top of the file = `PADDOCK_EGRESS_IP` (compose), and
-`define EGRESS_MAC` = the provisioner's `EGRESS_MAC`.
+**Keep in sync:** `define EGRESS_CORE_IP` at the top of the file = `PADDOCK_EGRESS_IP` (compose).
 
 Why rules 2 and 3 drop what egress opens: DNS rebinding through the proxy (`<private ip>.nip.io:4500`) passes gost's
 bypass. When the address is on a network egress is attached to, egress connects from that bridge directly. Rule 1
@@ -89,11 +127,12 @@ bypass. When the address is on a network egress is attached to, egress connects 
 a connection on any internal bridge: harnesses connect to it, and web reaches the API over pd-eapi. So:
 
 - on core, its static address is refused as a source;
-- on user networks (dynamic subnets) its fixed MAC is refused. A harness cannot copy that MAC because it has no
-  CAP_NET_ADMIN.
-
-The provisioner reconnects an egress attached before `EGRESS_MAC` once, so in-flight proxy connections on that network
-drop.
+- on user networks (dynamic subnets), its MACs are refused. Docker gives each endpoint a random MAC; it ignores
+  `MacAddress` in a network connect of a running container (seen on Docker 29), so the host learns the MACs from
+  `docker inspect` (`paddock-guard-egress-sync.sh`, triggered by each `connect` event of egress and every minute).
+  A harness cannot copy a MAC because it has no CAP_NET_ADMIN.
+- Window: a user network attached after the last sync is unprotected until the event-driven sync runs (normally well
+  under a second; with the timer only, up to a minute).
 
 gost serves its API (top-level `api:`, the only form that works in 3.3.2) on every interface of egress. Port 18080 is
 therefore fenced here and not in gost: refused on pu*, core and outside, and allowed on pd-eapi, where web is the only
@@ -103,14 +142,18 @@ client.
 
 `docs/razum/paddock-guard-test.sh` builds the bridges in throwaway namespaces (`pgt-*`) and loads the real
 `paddock-guard.nft` there. Usage: `sudo ./paddock-guard-test.sh ./paddock-guard.nft`. It needs root, iproute2,
-nft, python3 and Linux ≥ 5.3, and touches no host interface or ruleset. Run here on 6.18 / nft 1.0.9: **25/25 PASS**:
+nft, python3 and Linux ≥ 5.3, and touches no host interface or ruleset. Run here on 6.18 / nft 1.0.9: **30/30 PASS**:
 
 - On a user bridge: harness→web:3000 and web→harness:4500 open; harness→web:3001, web→harness:4501 and →:18080
   dropped.
 - On core: →egress:8080 open, →:18080 dropped; egress (172.20.1.251) → legacy harness:4500 dropped.
-- Egress with `EGRESS_MAC` on a user bridge:
-  - harness→egress:8080 open, →:18080 dropped;
-  - egress→harness:4500 and egress→web:3000 dropped (rebinding).
+- Egress on a user bridge (random MAC):
+  - before the sync, egress→harness:4500 is open;
+  - the sync script (with a fake `docker`) loads only the user-network MACs, lower-cased;
+  - a reload empties the set and a re-sync refills it;
+  - `watch` syncs at start and on egress's connect events only;
+  - after the sync, harness→egress:8080 is open, →:18080 dropped, and egress→harness:4500 and egress→web:3000
+    are dropped (rebinding).
 - On egress-api: web→egress:18080 open; egress→web:3000 dropped.
 - Bridges → host sshd dropped.
 - outside → VPC dropped; outside → public open; inbound to the outside bridge unaffected.

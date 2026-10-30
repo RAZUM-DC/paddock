@@ -8,11 +8,14 @@
 #   pd-out   outside network (edge, egress): the only bridge with a route to the internet
 #   pd-core  core network (web, edge at PADDOCK_EDGE_IP, egress at PADDOCK_EGRESS_IP, other services, legacy harnesses)
 #   pd-eapi  egress-api network (web ↔ gost API), internal
-#   pu<hex>  one per SSO user (harness-<id>, web, egress with MAC EGRESS_MAC), internal
+#   pu<hex>  one per SSO user (harness-<id>, web, egress), internal
 
-# Keep in sync with docker-compose.provisioner.yml (PADDOCK_EGRESS_IP) and the provisioner (EGRESS_MAC).
+# Keep in sync with docker-compose.provisioner.yml (PADDOCK_EGRESS_IP).
 define EGRESS_CORE_IP = 172.20.1.251
-define EGRESS_MAC = 02:00:00:00:00:e1
+#
+# The set egress_macs (egress's MACs on the user networks; Docker gives each endpoint a random one) is filled by
+# paddock-guard-egress-sync.sh. Loading this file empties it: reload with `systemctl reload paddock-guard`, which
+# re-syncs, or run the sync script right after `nft -f`.
 
 table inet paddock_guard
 delete table inet paddock_guard
@@ -32,6 +35,11 @@ table inet paddock_guard {
 
 	# Private destinations the outside network may still open connections to, as "address . port" (tcp or udp),
 	# e.g. an upstream proxy or a resolver in the VPC. Empty by default.
+	# Filled by paddock-guard-egress-sync.sh (flush + add in one transaction).
+	set egress_macs {
+		type ether_addr
+	}
+
 	set outside_allow4 {
 		type ipv4_addr . inet_service
 		flags interval
@@ -50,11 +58,11 @@ table inet paddock_guard {
 		iifname "pd-out" ct state new ip6 daddr @private6 counter drop comment "pd-out to private6"
 
 		# 2. Per-user networks, between members of the same bridge: only web :3000, harness :4500, egress proxy :8080.
-		#    Egress itself never opens anything there (it is attached to every user network with the fixed MAC
-		#    EGRESS_MAC; a harness has no CAP_NET_ADMIN to copy it): this stops DNS rebinding through the proxy
-		#    (<harness ip>.nip.io:4500) from reaching any user's harness or web.
+		#    Egress itself never opens anything there (its MACs on the user networks are in @egress_macs; a harness has
+		#    no CAP_NET_ADMIN to copy one): this stops DNS rebinding through the proxy (<harness ip>.nip.io:4500)
+		#    from reaching any user's harness or web.
 		#    Bridged traffic: seen here only with br_netfilter and net.bridge.bridge-nf-call-iptables=1.
-		iifname "pu*" oifname "pu*" ct state new ether saddr $EGRESS_MAC counter drop comment "egress into user bridges"
+		iifname "pu*" oifname "pu*" ct state new ether saddr @egress_macs counter drop comment "egress into user bridges"
 		iifname "pu*" oifname "pu*" ct state new tcp dport { 3000, 4500, 8080 } accept
 		iifname "pu*" oifname "pu*" ct state new counter drop comment "pu intra-bridge"
 

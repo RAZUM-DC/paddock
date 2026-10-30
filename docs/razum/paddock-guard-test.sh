@@ -8,7 +8,20 @@ RULES=$1
 v=$(uname -r); maj=${v%%.*}; min=${v#*.}; min=${min%%.*}
 if [ "$maj" -lt 5 ] || { [ "$maj" -eq 5 ] && [ "$min" -lt 3 ]; }; then echo "kernel $v < 5.3: not running"; exit 1; fi
 NS="pgt-r pgt-a pgt-w pgt-x pgt-e pgt-v pgt-p pgt-c pgt-g pgt-y pgt-z"
+SYNC=$(dirname "$RULES")/paddock-guard-egress-sync.sh
+FAKE=$(mktemp -d)
 cleanup() { for n in $NS; do ip netns pids $n 2>/dev/null | xargs -r kill 2>/dev/null; ip netns del $n 2>/dev/null; done; }
+# A fake `docker inspect` for the sync script: egress on two user networks (random MACs, one upper-case) and on core.
+cat > "$FAKE/docker" <<'FAKEDOCKER'
+#!/bin/sh
+case "$1 $3" in
+  "inspect {{.Id}}") echo egress-id ;;
+  inspect*) printf 'paddock-u-u-000000000001 1E:74:00:00:00:04\npaddock_core 02:aa:bb:cc:dd:ee\npaddock-u-u-000000000002 1e:74:00:00:00:05\n' ;;
+  events*) printf 'web-id\negress-id\nharness-id\n' ;;   # three connects, one of them egress's; then the stream ends
+esac
+FAKEDOCKER
+chmod +x "$FAKE/docker"
+trap 'rm -rf "$FAKE"' EXIT
 cleanup
 for n in $NS; do ip netns add $n; ip -n $n link set lo up; done
 R="ip netns exec pgt-r"
@@ -31,7 +44,7 @@ port y 10.254.254.2/29 pd-eapi                      # web on egress-api
 port z 10.254.254.3/29 pd-eapi                      # egress on egress-api
 port a 10.210.0.2/26 pu000000000001; ip -n pgt-a route add default via 10.210.0.1
 port w 10.210.0.3/26 pu000000000001; ip -n pgt-w route add default via 10.210.0.1
-port x 10.210.0.4/26 pu000000000001 "" 02:00:00:00:00:e1   # egress on a user network (EGRESS_MAC)
+port x 10.210.0.4/26 pu000000000001 "" 1e:74:00:00:00:04   # egress on a user network (a random Docker MAC)
 port e 10.211.0.2/24 pd-out;          ip -n pgt-e route add default via 10.211.0.1
 port v 10.30.0.2/24 none 10.30.0.1/24; ip -n pgt-v route add default via 10.30.0.1
 port p 203.0.113.2/24 none 203.0.113.1/24; ip -n pgt-p route add default via 203.0.113.1
@@ -61,7 +74,19 @@ $R sysctl -qw net.bridge.bridge-nf-call-iptables=1
 try "baseline pu other port" a 10.210.0.3 3001 open
 try "baseline pd-out to private" e 10.30.0.2 80 open
 $R nft -f "$RULES" || exit 1
-echo "== with the ruleset, br_netfilter on"
+echo "== with the ruleset, egress_macs still empty"
+try "egress -> harness:4500 before the sync (not yet known)" x 10.210.0.2 4500 open
+$R env PATH="$FAKE:$PATH" "$SYNC" once
+set_is() { got=$($R nft list set inet paddock_guard egress_macs | tr -d ' \t\n' | grep -o 'elements={[^}]*}' || echo none)
+  [ "$got" = "$2" ] && r=PASS || r=FAIL; echo "$r  $1: $got (want $2)"; }
+set_is "sync: user-network MACs only, lower-cased" "elements={1e:74:00:00:00:04,1e:74:00:00:00:05}"
+$R nft -f "$RULES"
+set_is "a reload empties the set" none
+$R env PATH="$FAKE:$PATH" "$SYNC" once >/dev/null
+set_is "re-sync after the reload" "elements={1e:74:00:00:00:04,1e:74:00:00:00:05}"
+n=$($R env PATH="$FAKE:$PATH" "$SYNC" watch 2>&1 | grep -c "MAC(s)")
+[ "$n" = 2 ] && r=PASS || r=FAIL; echo "$r  watch: one sync at start + one per egress connect event: $n (want 2)"
+echo "== with the ruleset and egress_macs synced, br_netfilter on"
 try "harness -> web:3000" a 10.210.0.3 3000 open
 try "web -> harness:4500" w 10.210.0.2 4500 open
 try "harness -> web:3001" a 10.210.0.3 3001 blocked

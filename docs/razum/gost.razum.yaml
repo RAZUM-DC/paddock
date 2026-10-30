@@ -38,7 +38,7 @@
 #   resolved IP (chain/router.go dial: xnet.Resolve then dial; route.go: same). gost v3.3.2 cannot filter on resolved
 #   addresses for a direct (chainless) service. This MUST be covered on the host: nft drops new connections from the
 #   pd-out bridge to private ranges (rule 1 in paddock-guard.nft), and new connections egress opens on pd-core (its
-#   static PADDOCK_EGRESS_IP) and on user bridges (its fixed EGRESS_MAC) (rules 2/3; docs/razum/g017-host-firewall.md).
+#   static PADDOCK_EGRESS_IP) and on user bridges (its MACs, synced into @egress_macs) (rules 2/3; docs/razum/g017-host-firewall.md).
 # - The API port 18080: the top-level `api:` listens on every interface of egress (core, outside, every user network).
 #   Only the password protects it inside gost; the host firewall allows 18080 only on pd-eapi (web).
 # - Probe ports (:18100+, created by web only when a proxy chain is configured) have no bypass.

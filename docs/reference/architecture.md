@@ -70,6 +70,7 @@ browser ──HTTPS/WS──▶ edge(nginx) ──▶ web(Next.js, WS bridge) �
 | web UI login | password 12+ chars and 2FA (TOTP: Authy etc.), rate limit per client IP (X-Forwarded-For from Traefik/edge, only private networks are trusted) | `tests/two-factor.mjs` |
 | browser ↔ harness | only the web UI holds the token; the WS bridge checks the cookie session and Origin | 401 without cookie, 403 from a foreign Origin |
 | web UI ↔ egress API | gost API only on `core` and behind a password known to the web UI | 401 from a harness |
+| harness → web (`/api/harness/*`) | git credentials and secret requests: the caller is identified by its own capability token and sees only its own user's data; refused when the request carries `X-Forwarded-For`/`Forwarded`/`X-Real-IP` (came through edge or another proxy), and edge returns 404 for the prefix | `web/test/harness-api.test.mjs`; not yet on a live Docker |
 | containers | `cap_drop: ALL`, `no-new-privileges`, memory/CPU limits | compose |
 
 ## Per-user networks (optional provisioner)
@@ -93,7 +94,7 @@ What a provisioned harness can reach on its network, and nothing else:
 | egress | `:8080` HTTP proxy | the bypass refuses private targets and internal names (gost.example.yaml). **Egress sits on every user network, so a proxy without that bypass is a bridge to other harnesses** (they still require their capability token). |
 | egress | `:18080` gost API | password; the hardened variant admits only the `egress-api` network |
 | egress | `:18100+` probe ports (when a proxy chain is configured) | none: each forwards through one upstream proxy, like `:8080` but without the bypass. The upstream proxy cannot reach Docker-internal addresses, but if an upstream proxy runs on the same host/LAN, treat these ports as an open path |
-| web | `:3000` HTTP + WS | the same as from the browser: session cookie, `Origin` check. Web sits on every user network |
+| web | `:3000` HTTP + WS | the same as from the browser: session cookie, `Origin` check. Web sits on every user network (alias `web`). `/api/harness/*` answers only to a harness token, with that harness's own data |
 | other harnesses, provisioner, edge | — | not on this network: no route |
 
 Not verified yet (needs a live Docker host): that Docker's `internal` bridge networks indeed drop traffic between
@@ -105,11 +106,15 @@ two of them through the shared containers (they should: web and egress do not ro
 |---|---|---|
 | `harness-home-<user>` | `~/.codex`: sessions, archive, config.toml, ChatGPT login, skills, Paddock tools (`paddock/tools/`) | harness; the web UI via its API |
 | `workspace-<user>` | `/workspace`: projects, images (`images/`), attachments (`.paddock/uploads/`) | harness |
-| `web-data` | `auth.db`: web UI users and sessions, user → harness mapping, last OIDC groups | web |
+| `web-data` | `auth.db`: web UI users and sessions, user → harness mapping, last OIDC groups, git accounts (tokens AES-256-GCM, key `PADDOCK_SECRETS_KEY` or derived from `BETTER_AUTH_SECRET`) | web |
 | `web-builds` | current and previous web UI builds | supervisor |
 | `secrets/` (directory on the host) | harness tokens, `web.env`, `egress/gost.yaml` with proxy passwords | admin; the web UI (proxies via the gost API) |
 
-Moving to another server = copy `secrets/` and the volumes, then `docker compose up`. Automation: roadmap 3.8.
+Secret requests (the `secrets` tool) live only in web's memory for at most 15 minutes; the value ends up in the file the
+agent named, inside `workspace-<user>`.
+
+Moving to another server = copy `secrets/` and the volumes, then `docker compose up` (keep `BETTER_AUTH_SECRET` or
+`PADDOCK_SECRETS_KEY`, otherwise stored git tokens cannot be decrypted and must be added again). Automation: roadmap 3.8.
 
 ## Fleet (plan, roadmap 5.8)
 

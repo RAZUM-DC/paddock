@@ -21,6 +21,9 @@ links:
 | `web/components/settings.tsx` | account, NeuralDeep, Codex, proxy, password (images — in progress) |
 | `web/lib/proxy.ts` | gost API (admin only), outbound requests through egress |
 | `web/tools/` | registry of Paddock tools (CLI + skill); the web UI installs them into the harness, see `web/tools/README.md` |
+| `web/lib/harness-api.ts` | `/api/harness/*` for harness containers (git credentials, secret requests), handled in `server.ts` before Next; harness auth in `lib/harness-auth.ts` |
+| `web/lib/git-accounts.ts` | per-user git accounts (`git_accounts` in `/data/auth.db`, token sealed by `lib/secret-box.ts`), matching by host and path prefix; browser API `/api/git/*` |
+| `web/lib/secret-requests.ts` | in-memory secret requests of the `secrets` tool; browser API `/api/secret-requests`, form in `components/secret-requests.tsx` |
 | `web/lib/turn-meta.ts` | `turn_meta` table in `/data/auth.db`: model, TTFT, tok/s, last usage of a turn |
 | `web/supervisor.sh` | builds next to the old version, switches only when `/login` is alive, rolls back; `SELF_DEPLOY=0` = build once, ignore deploy requests |
 | `web/Dockerfile.prod` | alternative image: built at image build time, no supervisor, no self-deploy |

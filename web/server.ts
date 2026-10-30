@@ -4,8 +4,10 @@ import { Agent, createServer, type IncomingHttpHeaders } from "node:http";
 import { readFileSync } from "node:fs";
 import next from "next";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
-import { auth, ensureDb, harnessIdOf } from "./lib/auth";
+import { auth, db, ensureDb, harnessIdOf } from "./lib/auth";
 import { ensureHarness, provisioningEnabled } from "./lib/provision";
+import { createHarnessApi, isHarnessApiPath } from "./lib/harness-api";
+import { gitAccounts, harnessApiEnabled, secretRequests } from "./lib/harness-services";
 
 const dev = process.env.NODE_ENV !== "production";
 const port = Number(process.env.PORT ?? 3000);
@@ -27,7 +29,9 @@ const handle = app.getRequestHandler();
 await app.prepare();
 const nextUpgrade = app.getUpgradeHandler();
 
-const server = createServer((req, res) => handle(req, res));
+// /api/harness/*: harness containers only (git credentials, secret requests), handled before Next — see lib/harness-api.ts.
+const harnessApi = createHarnessApi({ enabled: harnessApiEnabled(), tokensDir, db, gitAccounts, secrets: secretRequests() });
+const server = createServer((req, res) => (isHarnessApiPath(req.url) ? void harnessApi(req, res) : handle(req, res)));
 const wss = new WebSocketServer({ noServer: true, maxPayload: 32 * 1024 * 1024 });
 
 server.on("upgrade", async (req, socket, head) => {

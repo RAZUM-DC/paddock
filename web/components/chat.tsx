@@ -16,6 +16,7 @@ import { CWD, Pane, type PaneCommand, type PaneHandle, type PaneState } from "./
 import { Settings, type LoginEvent } from "./settings";
 import { Sidebar, type ThreadInfo } from "./sidebar";
 import { WorkspaceStatus } from "./workspace-status";
+import { SecretRequestCards, useSecretRequests, type SecretRequest } from "./secret-requests";
 import { configuredProviderModels } from "@/lib/providers";
 import type { RateLimits } from "./status-bar";
 
@@ -391,6 +392,14 @@ function Workspace({ email }: { email: string }) {
   };
 
   const titleOf = (id: string | null) => (id ? threads.find((t) => t.id === id)?.title ?? null : null);
+
+  // Secret requests go to the visible pane showing the chat that asked; otherwise to the active pane.
+  const secrets = useSecretRequests(connected);
+  const secretsByPane = new Map<number, SecretRequest[]>();
+  for (const r of secrets.requests) {
+    const at = visible.find((i) => r.threadId && states[i].threadId === r.threadId) ?? activePane;
+    secretsByPane.set(at, [...(secretsByPane.get(at) ?? []), r]);
+  }
   const openIds = visible.map((i) => states[i].threadId).filter(Boolean) as string[];
   // Сетка с дорожками под границы: [окно | 5px | окно] по столбцам и, для 4 окон, так же по строкам.
   const gridStyle = layout === 1
@@ -492,6 +501,7 @@ function Workspace({ email }: { email: string }) {
               <div key={i} data-slot={shown ? slot : undefined} data-pane={i} style={shown ? place(i) : undefined}
                 className={`${shown ? "flex" : "hidden"} relative min-h-0 min-w-0 flex-col bg-[var(--bg)] ${drag?.pane === i ? "opacity-50" : ""}`}>
                 {over && <div className="pointer-events-none absolute inset-0 z-20 border-2 border-dashed border-[var(--accent)] bg-[var(--accent)]/10" />}
+                {shown && <SecretRequestCards requests={secretsByPane.get(i) ?? []} titleOf={titleOf} onDone={secrets.done} />}
                 <Pane
                   handleRef={h}
                   api={api}

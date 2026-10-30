@@ -1,4 +1,6 @@
 secrets/
+# The Paddock tool named "secrets" is code, not secrets.
+!web/tools/secrets/
 .env
 node_modules/
 .next/

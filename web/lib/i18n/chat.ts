@@ -136,6 +136,19 @@ const ru: Record<string, string> = {
   "Read chat": "Чтение чата",
   "Open chats": "Открытые чаты",
   "waiting for the answer…": "ждём ответа…",
+  // secret requests from the agent
+  "Saved. The agent writes it to the file and continues.": "Сохранено. Агент запишет значение в файл и продолжит.",
+  "Declined. The agent has been told.": "Отклонено. Агент узнает об этом.",
+  "The agent asks for a secret": "Агент просит секрет",
+  "from the chat “{title}”": "из чата «{title}»",
+  "from a chat of yours": "из одного из ваших чатов",
+  "{n} min left": "осталось {n} мин",
+  "file": "файл",
+  "value": "значение",
+  "Hide": "Скрыть",
+  "Show": "Показать",
+  "Decline": "Отклонить",
+  "The value goes into the file only, not into the chat. It is not stored by Paddock.": "Значение попадёт только в файл, не в чат. Paddock его не хранит.",
 };
 
 export default ru;

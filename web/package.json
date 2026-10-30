@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "NODE_ENV=production tsx server.ts",
     "create-user": "tsx scripts/create-user.ts",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --import tsx --test test/*.test.mjs"
   },
   "dependencies": {
     "@assistant-ui/react": "0.15.32",

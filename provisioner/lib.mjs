@@ -69,6 +69,8 @@ export function configFromEnv(env) {
     selfContainer: env.PROVISIONER_CONTAINER || "paddock-provisioner",
     userEnvDir: env.USER_ENV_DIR || "",
     webContainer: env.WEB_CONTAINER || "paddock-web",
+    // The name a harness reaches web by on its own network (git credential helper, secrets tool: http://web:3000).
+    webAlias: env.WEB_ALIAS || "web",
     egressContainer: env.EGRESS_CONTAINER || "paddock-egress",
     egressAlias: env.EGRESS_ALIAS || "egress",
     egressPort: int(env.EGRESS_PORT, 8080, 1, 65535),

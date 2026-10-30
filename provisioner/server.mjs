@@ -66,8 +66,8 @@ async function attachShared(id) {
   const n = names(id);
   const net = await docker.inspect(`/networks/${n.network}`);
   const attached = new Set(Object.values(net?.Containers ?? {}).map((c) => c.Name));
-  // web reaches the harness by its alias; the harness reaches egress as "egress", the same name as in core.
-  for (const [container, aliases] of [[cfg.webContainer, []], [cfg.egressContainer, [cfg.egressAlias]]]) {
+  // web reaches the harness by its alias; the harness reaches egress as "egress" and web as "web", the same names as in core.
+  for (const [container, aliases] of [[cfg.webContainer, [cfg.webAlias]], [cfg.egressContainer, [cfg.egressAlias]]]) {
     if (attached.has(container)) continue;
     await docker.post(`/networks/${n.network}/connect`, networkConnectBody(container, aliases)).catch((e) =>
       // 403 "already exists in network" when two ensures race.

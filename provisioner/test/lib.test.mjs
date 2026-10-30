@@ -47,6 +47,7 @@ test("configFromEnv: defaults", () => {
   assert.equal(cfg.pidsLimit, 1024);
   assert.equal(cfg.readyTimeoutMs, 120000);
   assert.equal(cfg.webContainer, "paddock-web");
+  assert.equal(cfg.webAlias, "web");
   assert.equal(cfg.egressContainer, "paddock-egress");
   assert.equal(cfg.llm, null);
   assert.deepEqual(cfg.mcp, []);

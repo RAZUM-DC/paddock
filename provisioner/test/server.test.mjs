@@ -124,6 +124,7 @@ test("ensure creates network, attachments, volumes, token and container, then re
     assert.equal(net.Internal, true);
     assert.deepEqual(Object.keys(net.Containers).sort(), ["paddock-egress", "paddock-web"]);
     assert.deepEqual(net.Containers["paddock-egress"].Aliases, ["egress"]);
+    assert.deepEqual(net.Containers["paddock-web"].Aliases, ["web"]);
     assert.ok(p.state.volumes.has("harness-home-alice") && p.state.volumes.has("workspace-alice"));
 
     const token = readFileSync(join(p.tokens, "alice.token"), "utf8");

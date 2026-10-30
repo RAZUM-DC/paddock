@@ -22,9 +22,10 @@ admin: the web UI asks the provisioner, shows "preparing your workspace", and co
 2. Network `paddock-u-<id>`: bridge, `internal: true`, labels `paddock.user=<id>`. `paddock-web` and `paddock-egress`
    (`WEB_CONTAINER`, `EGRESS_CONTAINER`) are connected to it; egress gets the alias `egress` there, so the harness's
    `HTTPS_PROXY=http://egress:8080` works unchanged, and web gets the alias `web` (`WEB_ALIAS`), so the git credential
-   helper and the `secrets` tool reach `http://web:3000` as on `core`. Networks created before this alias existed keep
-   web without it: disconnect web from them once (the reconcile loop re-attaches it with the alias) or set
-   `PADDOCK_WEB_URL=http://paddock-web:3000` in the harness env.
+   helper and the `secrets` tool reach `http://web:3000` as on `core`. A container that is already on the network
+   without its alias (attached before the alias existed) is disconnected and reconnected with it, on ensure and in
+   the reconcile loop. New harnesses also get `PADDOCK_WEB_URL=http://<WEB_CONTAINER>:<WEB_PORT>` in their env (the
+   container name always resolves); a per-user env file cannot override it.
 3. Volumes `harness-home-<id>`, `workspace-<id>`.
 4. Container `harness-<id>` from `HARNESS_IMAGE`: the same command, env, `cap_drop: ALL`, `no-new-privileges`, restart
    `unless-stopped` as `users/_template.yml`; limits `HARNESS_MEMORY` / `HARNESS_CPUS` / `HARNESS_PIDS_LIMIT`
@@ -64,6 +65,7 @@ only when `config.toml` does not exist yet; later edits (Settings → Codex) are
 | `PROVISIONER_CONTAINER` | `paddock-provisioner` | its own name, to find the host path above |
 | `WEB_CONTAINER` / `EGRESS_CONTAINER` | `paddock-web` / `paddock-egress` | |
 | `WEB_ALIAS` | `web` | web's name on user networks |
+| `WEB_PORT` | `3000` | web's port, for the harness's `PADDOCK_WEB_URL` |
 | `HARNESS_MEMORY` / `HARNESS_CPUS` / `HARNESS_PIDS_LIMIT` | `4g` / `2` / `1024` | |
 | `USER_ENV_DIR` | — | per-user env files |
 | `RECONCILE_INTERVAL_MS` | `60000` | re-attach web/egress to user networks; `0` = off |

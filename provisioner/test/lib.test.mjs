@@ -1,7 +1,7 @@
 // Pure provisioner logic. Run: node --test test/ (from provisioner/).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { configFromEnv, configSeed, containerCreateBody, hostPathOf, idFromPath, idOfNetwork, isValidId, names, networkConnectBody, networkCreateBody, parseEnvFile, parseMemory, readiness, tomlString, validateEnsure, volumeCreateBody } from "../lib.mjs";
+import { configFromEnv, configSeed, containerCreateBody, hostPathOf, idFromPath, idOfNetwork, isValidId, missingAliases, names, networkConnectBody, networkCreateBody, parseEnvFile, parseMemory, readiness, tomlString, validateEnsure, volumeCreateBody } from "../lib.mjs";
 
 const TOKEN = "t".repeat(32);
 const base = (extra = {}) => configFromEnv({ PROVISIONER_TOKEN: TOKEN, ...extra });
@@ -129,7 +129,7 @@ test("containerCreateBody: same command and hardening as users/_template.yml, ow
   const b = containerCreateBody("alice", { ...cfg, hostTokensDir: "/srv/paddock/secrets/tokens" });
   assert.equal(b.Image, "paddock-harness-codex");
   assert.deepEqual(b.Cmd, ["codex", "app-server", "--listen", "ws://0.0.0.0:4500", "--ws-auth", "capability-token", "--ws-token-file", "/run/secrets/ws-token"]);
-  assert.deepEqual(b.Env, ["HTTPS_PROXY=http://egress:8080", "HTTP_PROXY=http://egress:8080", "NO_PROXY=localhost,127.0.0.1"]);
+  assert.deepEqual(b.Env, ["HTTPS_PROXY=http://egress:8080", "HTTP_PROXY=http://egress:8080", "NO_PROXY=localhost,127.0.0.1", "PADDOCK_WEB_URL=http://paddock-web:3000"]);
   assert.deepEqual(b.Labels, { "paddock.user": "alice", "paddock.managed-by": "paddock-provisioner" });
   assert.deepEqual(b.HostConfig, {
     Binds: ["harness-home-alice:/home/codex/.codex", "workspace-alice:/workspace", "/srv/paddock/secrets/tokens/alice.token:/run/secrets/ws-token:ro"],
@@ -146,7 +146,9 @@ test("containerCreateBody: same command and hardening as users/_template.yml, ow
 
 test("containerCreateBody: user env passes, cannot override the proxy; seed goes in env", () => {
   const { cfg } = base({ LLM_PROVIDER_NAME: "corp", LLM_BASE_URL: "https://llm.example/v1" });
-  const b = containerCreateBody("alice", { ...cfg, hostTokensDir: "/h" }, { LLM_API_KEY: "sk-1", HTTPS_PROXY: "http://evil:1" });
+  const b = containerCreateBody("alice", { ...cfg, hostTokensDir: "/h" }, { LLM_API_KEY: "sk-1", HTTPS_PROXY: "http://evil:1", PADDOCK_WEB_URL: "http://evil:1" });
+  assert.ok(b.Env.includes("PADDOCK_WEB_URL=http://paddock-web:3000"));
+  assert.ok(!b.Env.includes("PADDOCK_WEB_URL=http://evil:1"));
   assert.ok(b.Env.includes("LLM_API_KEY=sk-1"));
   assert.ok(b.Env.includes("HTTPS_PROXY=http://egress:8080"));
   assert.ok(!b.Env.includes("HTTPS_PROXY=http://evil:1"));
@@ -179,4 +181,19 @@ test("idOfNetwork: only networks this provisioner made, named after a valid id",
   assert.equal(idOfNetwork({ Name: "paddock-u-../x", Labels: L("../x") }), null);
   assert.equal(idOfNetwork({ Name: "bridge" }), null);
   assert.equal(idOfNetwork(null), null);
+});
+
+test("missingAliases: from the container's endpoint on that network", () => {
+  const c = { NetworkSettings: { Networks: { "paddock-u-a": { Aliases: ["abc123"], DNSNames: ["paddock-web", "abc123"] }, core: { Aliases: ["web"] } } } };
+  assert.deepEqual(missingAliases(c, "paddock-u-a", ["web"]), ["web"]);
+  assert.deepEqual(missingAliases(c, "core", ["web"]), []);
+  assert.deepEqual(missingAliases({ NetworkSettings: { Networks: { n: { Aliases: null, DNSNames: ["web"] } } } }, "n", ["web"]), []);
+  // Not on that network (or no inspect): nothing to fix here, connect handles it.
+  assert.deepEqual(missingAliases(c, "other", ["web"]), []);
+  assert.deepEqual(missingAliases(null, "n", ["web"]), []);
+});
+
+test("configFromEnv: WEB_PORT", () => {
+  assert.equal(base().cfg.webPort, 3000);
+  assert.equal(base({ WEB_PORT: "8080" }).cfg.webPort, 8080);
 });

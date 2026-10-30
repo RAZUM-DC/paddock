@@ -9,7 +9,7 @@ const PROVIDER_ID_RE = /^[A-Za-z0-9_-]{1,40}$/;
 // Codex reserves these provider ids for its built-ins.
 const RESERVED_PROVIDERS = new Set(["openai", "ollama", "lmstudio"]);
 // The harness's way out and its config home are the provisioner's business, not a per-user env file's.
-export const RESERVED_ENV = new Set(["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "CODEX_HOME", "PADDOCK_CONFIG_PREPEND", "PADDOCK_CONFIG_APPEND"]);
+export const RESERVED_ENV = new Set(["HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY", "https_proxy", "http_proxy", "no_proxy", "CODEX_HOME", "PADDOCK_CONFIG_PREPEND", "PADDOCK_CONFIG_APPEND", "PADDOCK_WEB_URL"]);
 
 export const names = (id) => ({
   container: `harness-${id}`,
@@ -71,6 +71,7 @@ export function configFromEnv(env) {
     webContainer: env.WEB_CONTAINER || "paddock-web",
     // The name a harness reaches web by on its own network (git credential helper, secrets tool: http://web:3000).
     webAlias: env.WEB_ALIAS || "web",
+    webPort: int(env.WEB_PORT, 3000, 1, 65535),
     egressContainer: env.EGRESS_CONTAINER || "paddock-egress",
     egressAlias: env.EGRESS_ALIAS || "egress",
     egressPort: int(env.EGRESS_PORT, 8080, 1, 65535),
@@ -193,6 +194,16 @@ export function networkCreateBody(id) {
 
 export const networkConnectBody = (container, aliases = []) => ({ Container: container, EndpointConfig: { Aliases: aliases } });
 
+// Is a container that is already on a network missing one of the aliases it should have there? (Docker keeps the
+// aliases of the connect call; a container attached before an alias was introduced has to be reconnected.)
+// The aliases live in the container's inspect, not the network's.
+export function missingAliases(containerInspect, network, aliases) {
+  const ep = containerInspect?.NetworkSettings?.Networks?.[network];
+  if (!ep) return [];
+  const have = new Set([...(ep.Aliases ?? []), ...(ep.DNSNames ?? [])]);
+  return aliases.filter((a) => !have.has(a));
+}
+
 export const volumeCreateBody = (name, id) => ({ Name: name, Labels: { "paddock.user": id, "paddock.managed-by": "paddock-provisioner" } });
 
 // The same container users/_template.yml describes, but alone on its own network.
@@ -205,6 +216,9 @@ export function containerCreateBody(id, cfg, userEnv = {}) {
     HTTPS_PROXY: proxy,
     HTTP_PROXY: proxy,
     NO_PROXY: "localhost,127.0.0.1",
+    // web by container name, which Docker always resolves on a user network, whatever its aliases (credential helper,
+    // secrets tool).
+    PADDOCK_WEB_URL: `http://${cfg.webContainer}:${cfg.webPort}`,
   };
   if (seed.prepend) env.PADDOCK_CONFIG_PREPEND = seed.prepend;
   if (seed.append) env.PADDOCK_CONFIG_APPEND = seed.append;

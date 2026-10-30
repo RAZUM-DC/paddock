@@ -34,11 +34,22 @@ function fakeDocker(sock, tokensDir) {
       n.Containers[b.Container] = { Name: b.Container, Aliases: b.EndpointConfig?.Aliases };
       return json(200);
     }
+    if (req.method === "POST" && (m = /^\/networks\/([^/]+)\/disconnect$/.exec(path))) {
+      const n = state.networks.get(m[1]);
+      if (!n?.Containers[b.Container]) return json(404, { message: "not connected" });
+      delete n.Containers[b.Container];
+      return json(200);
+    }
     if (req.method === "GET" && (m = /^\/volumes\/([^/]+)$/.exec(path))) return state.volumes.has(m[1]) ? json(200, state.volumes.get(m[1])) : json(404, { message: "no such volume" });
     if (req.method === "POST" && path === "/volumes/create") { state.volumes.set(b.Name, b); return json(201, b); }
     if (req.method === "GET" && (m = /^\/images\/(.+)\/json$/.exec(path))) return state.images.has(decodeURIComponent(m[1])) ? json(200, {}) : json(404, { message: "no such image" });
     if (req.method === "GET" && (m = /^\/containers\/([^/]+)\/json$/.exec(path))) {
       if (m[1] === "paddock-provisioner") return json(200, { Mounts: [{ Type: "bind", Destination: tokensDir, Source: "/host/secrets/tokens" }] });
+      if (m[1] === "paddock-web" || m[1] === "paddock-egress") {
+        const nets = {};
+        for (const [name, n] of state.networks) if (n.Containers[m[1]]) nets[name] = { Aliases: n.Containers[m[1]].Aliases ?? null };
+        return json(200, { Name: `/${m[1]}`, NetworkSettings: { Networks: nets } });
+      }
       return state.containers.has(m[1]) ? json(200, state.containers.get(m[1])) : json(404, { message: "no such container" });
     }
     if (req.method === "POST" && path === "/containers/create") {
@@ -193,6 +204,26 @@ test("reconcile re-attaches web and egress to managed networks after they were r
     await new Promise((r) => setTimeout(r, 600));
     assert.deepEqual(Object.keys(p.state.networks.get("paddock-u-alice").Containers).sort(), ["paddock-egress", "paddock-web"]);
     assert.deepEqual(p.state.networks.get("paddock-u-evil").Containers, {});
+  } finally { p.stop(); }
+});
+
+test("web already on a user network without its alias is reconnected with it", async () => {
+  const p = await start();
+  try {
+    // A network from before the alias existed: web and egress attached without aliases.
+    p.state.networks.set("paddock-u-alice", { Name: "paddock-u-alice", Internal: true, Labels: { "paddock.user": "alice", "paddock.managed-by": "paddock-provisioner" },
+      Containers: { "paddock-web": { Name: "paddock-web", Aliases: [] }, "paddock-egress": { Name: "paddock-egress", Aliases: ["egress"] } } });
+    await p.call("POST", "/harness/ensure", { id: "alice" });
+    await waitReady(p.call, "alice");
+    const net = p.state.networks.get("paddock-u-alice");
+    assert.deepEqual(net.Containers["paddock-web"].Aliases, ["web"]);
+    assert.deepEqual(net.Containers["paddock-egress"].Aliases, ["egress"]);
+    assert.equal(p.state.calls.filter((c) => c === "POST /networks/paddock-u-alice/disconnect").length, 1);
+    // Fixed once: the next ensure leaves it alone.
+    const before = p.state.calls.length;
+    await p.call("POST", "/harness/ensure", { id: "alice" });
+    await new Promise((r) => setTimeout(r, 300));
+    assert.ok(!p.state.calls.slice(before).some((c) => /disconnect|connect$/.test(c)));
   } finally { p.stop(); }
 });
 

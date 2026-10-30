@@ -12,7 +12,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { dockerClient } from "./docker.mjs";
-import { configFromEnv, containerCreateBody, hostPathOf, idFromPath, idOfNetwork, MANAGED_FILTER, names, networkConnectBody, networkCreateBody, parseEnvFile, readiness, validateEnsure, volumeCreateBody } from "./lib.mjs";
+import { configFromEnv, containerCreateBody, hostPathOf, idFromPath, idOfNetwork, MANAGED_FILTER, missingAliases, names, networkConnectBody, networkCreateBody, parseEnvFile, readiness, validateEnsure, volumeCreateBody } from "./lib.mjs";
 
 const { cfg, errors } = configFromEnv(process.env);
 if (errors.length) {
@@ -68,7 +68,14 @@ async function attachShared(id) {
   const attached = new Set(Object.values(net?.Containers ?? {}).map((c) => c.Name));
   // web reaches the harness by its alias; the harness reaches egress as "egress" and web as "web", the same names as in core.
   for (const [container, aliases] of [[cfg.webContainer, [cfg.webAlias]], [cfg.egressContainer, [cfg.egressAlias]]]) {
-    if (attached.has(container)) continue;
+    if (attached.has(container)) {
+      // Attached, but perhaps without its alias (attached before the alias existed): reconnect once with it.
+      const c = await docker.inspect(`/containers/${encodeURIComponent(container)}/json`);
+      const missing = missingAliases(c, n.network, aliases);
+      if (missing.length === 0) continue;
+      await docker.post(`/networks/${n.network}/disconnect`, { Container: container, Force: false }).catch((e) => (e.status === 404 ? null : Promise.reject(e)));
+      log(`${id}: ${container} reconnecting to ${n.network} for alias ${missing.join(", ")}`);
+    }
     await docker.post(`/networks/${n.network}/connect`, networkConnectBody(container, aliases)).catch((e) =>
       // 403 "already exists in network" when two ensures race.
       e.status === 403 && /already exists/i.test(e.message) ? null : Promise.reject(e));

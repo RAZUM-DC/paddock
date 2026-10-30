@@ -15,7 +15,7 @@
 # The harness image must exist locally: docker compose --profile images build harness-image
 
 networks:
-  # Fixed Linux bridge names (host firewall: docs/razum/g017-host-firewall.md) and a fixed core subnet, so the edge
+  # Fixed Linux bridge names (so host firewall rules can match pd-* / pu*) and a fixed core subnet, so the edge
   # can have a static address that web trusts for X-Forwarded-For (TRUSTED_PROXIES). Changing driver_opts or ipam of
   # an existing network needs `docker compose down` (volumes are kept) before `up`.
   core:

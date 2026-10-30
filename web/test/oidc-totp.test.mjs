@@ -119,6 +119,10 @@ test("first enrolment: otpauth URI, stored like better-auth's twoFactor, then a 
   let row = A.db.prepare(`SELECT * FROM "twoFactor" WHERE "userId" = ?`).get(user.id);
   assert.equal(row.verified, 0);
   assert.ok(row.secret.startsWith("$ba$") || /^[0-9a-f]+$/.test(row.secret), "encrypted like better-auth");
+  // Backup codes exist from the start but count only after the app is confirmed.
+  const { symmetricDecrypt } = await import("better-auth/crypto");
+  const early = JSON.parse(await symmetricDecrypt({ key: (await A.auth.$context).secretConfig, data: row.backupCodes }))[0];
+  assert.equal((await authFetch("/second-factor/verify", { jar, method: "POST", body: { code: early } })).status, 401);
   // Wrong code first: still pending.
   const bad = await authFetch("/second-factor/verify", { jar, method: "POST", body: { code: codeAt(secret, 5) } });
   assert.equal(bad.status, 401);

@@ -224,10 +224,11 @@ test("lockout: 5 wrong codes revoke the session; 10 across sessions lock the use
   const user = userByEmail(email);
   const secret = await secretOf(user.id);
   const wrong = () => codeAt(secret, 7);
+  const sid = sessionRow(jar).id;
   const codes = [];
   for (let i = 0; i < 5; i++) codes.push((await authFetch("/second-factor/verify", { jar, method: "POST", body: { code: wrong() } })).json.code);
   assert.deepEqual(codes, ["INVALID_CODE", "INVALID_CODE", "INVALID_CODE", "INVALID_CODE", "SESSION_REVOKED"]);
-  assert.equal(sessionRow(jar), undefined, "the session is deleted");
+  assert.equal(A.db.prepare(`SELECT 1 FROM "session" WHERE "id" = ?`).get(sid), undefined, "the 5th failure itself deletes the session");
   assert.equal((await authFetch("/second-factor/verify", { jar, method: "POST", body: { code: codeAt(secret) } })).status, 401);
   // Second session: 5 more wrong codes reach the user limit (10).
   const jar2 = await oidcLogin(A, idp, { sub: "s-4", email });
@@ -492,4 +493,30 @@ test("locks grow (15 → 30 min), are logged without secrets, and a hard lock ne
   } finally {
     console.warn = warn;
   }
+});
+
+test("a session whose attempts are used up is revoked by its next request, even if nothing revoked it before", async () => {
+  const u = await enrolled("spent@corp.example", "c-11");
+  const jar = await u.login();
+  const sid = sessionRow(jar).id;
+  // As if 5 attempts had been counted (e.g. a crash between counting and revoking).
+  A.db.prepare("INSERT INTO second_factor_failures (key, failures, first_at, locked_until, locks) VALUES (?, 5, ?, 0, 0)").run(`s:${sid}`, Date.now());
+  const r = await authFetch("/second-factor/verify", { jar, method: "POST", body: { code: codeAt(u.secret, 1) } });
+  assert.deepEqual([r.status, r.json.code], [401, "SESSION_REVOKED"]);
+  assert.equal(A.db.prepare(`SELECT 1 FROM "session" WHERE "id" = ?`).get(sid), undefined);
+});
+
+test("a verified or exempt session rotated by another endpoint (change-password) keeps its state", async () => {
+  const ctx = await A.auth.$context;
+  const u = await ctx.internalAdapter.createUser({ email: "rot@corp.example", name: "rot", emailVerified: true });
+  await ctx.internalAdapter.linkAccount({ userId: u.id, providerId: "credential", accountId: u.id, password: await ctx.password.hash("rot-password-12345") });
+  const jar = await oidcLogin(A, idp, { sub: "c-12", email: "rot@corp.example" });
+  await enrolAndVerify(jar);
+  const before = sessionRow(jar);
+  const r = await authFetch("/change-password", { jar, method: "POST", body: { currentPassword: "rot-password-12345", newPassword: "rot-password-67890", revokeOtherSessions: true } });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  const after = sessionRow(jar);
+  assert.notEqual(after.id, before.id, "better-auth rotated the session");
+  assert.equal(A.db.prepare("SELECT state FROM session_second_factor WHERE session_id = ?").get(after.id)?.state, "verified");
+  assert.ok(await A.sessionFromHeaders(headersOf(jar)), "the rotated session still works");
 });

@@ -28,6 +28,11 @@ const CLEANUP_EVERY_MS = 10 * 60_000;
 
 const refuse = (status: "FORBIDDEN" | "UNAUTHORIZED" | "BAD_REQUEST" | "CONFLICT" | "TOO_MANY_REQUESTS", code: string, message: string) => new APIError(status, { code, message });
 
+// The state of the session a request came with, recorded by the gate and keyed by the request's Headers object (the
+// same object better-auth hands to its database hooks). A session that another endpoint creates for the same user in
+// that request (better-auth rotates sessions on password change etc.) inherits it.
+const requestSessions = new WeakMap<object, { userId: string; state: SessionState | null }>();
+
 // One line per lock, for the admin; no codes, no secrets.
 function logLock(userId: string, c: { lockedUntil: number; locks: number } | null) {
   if (!c) return;
@@ -65,6 +70,7 @@ export function secondFactorPlugin(db: Database.Database, providerId: string) {
       cleanupSecondFactor(db);
     }
     const { session, user } = found;
+    if (ctx.headers) requestSessions.set(ctx.headers, { userId: user.id, state: sessionState(db, session.id, user.id, providerId) });
     if (isPending(db, session.id, user.id, providerId) && !allowedWhilePending(ctx.path)) throw refuse("FORBIDDEN", "SECOND_FACTOR_REQUIRED", "Second factor required");
     // For any session: the SSO account cannot be unlinked (otherwise unlink, then disable) and TOTP cannot be disabled
     // while the user has an SSO account.
@@ -182,15 +188,12 @@ export function secondFactorSessionHooks(db: Database.Database, providerId: stri
       create: {
         after: async (session: { id: string; userId: string }, ctx: unknown) => {
           setupSecondFactorTables(db);
-          const c = ctx as { path?: string; params?: Record<string, unknown>; context?: { session?: { session?: { id: string } } | null } } | null;
+          const c = ctx as { path?: string; params?: Record<string, unknown>; headers?: object } | null;
           let state: SessionState | null = classifyNewSession(c?.path, c?.params, providerId);
-          // A session rotated by another endpoint (password change etc.) keeps the state of the one it replaces; the
-          // gate made sure that one was not pending.
-          const from = c?.context?.session?.session?.id;
-          if (state === null && from) {
-            const prev = sessionState(db, from, session.userId, providerId);
-            if (prev === "verified" || prev === "exempt") state = prev;
-          }
+          // A session rotated by another endpoint keeps the state of the one the request came with (same user only);
+          // the gate made sure that one was not pending.
+          const prev = c?.headers ? requestSessions.get(c.headers) : undefined;
+          if (state === null && prev && prev.userId === session.userId && (prev.state === "verified" || prev.state === "exempt")) state = prev.state;
           // Never overwrite: /second-factor/verify sets "verified" itself.
           if (state) db.prepare("INSERT OR IGNORE INTO session_second_factor (session_id, user_id, state, updated_at) VALUES (?, ?, ?, ?)").run(session.id, session.userId, state, Date.now());
         },

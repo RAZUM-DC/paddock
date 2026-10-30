@@ -1,7 +1,7 @@
 // Цепочка внешних прокси в egress (gost). Морда читает и меняет её через API gost; пароли наружу не отдаёт.
 import { request as httpRequest } from "node:http";
 import { connect as tlsConnect } from "node:tls";
-import { auth, isAdminUser } from "./auth";
+import { isAdminUser, sessionFromHeaders } from "./auth";
 
 const api = process.env.GOST_API ?? "http://egress:18080/api";
 const basic = "Basic " + Buffer.from(`${process.env.GOST_API_USER ?? ""}:${process.env.GOST_API_PASS ?? ""}`).toString("base64");
@@ -19,7 +19,7 @@ async function gost(path: string, init: RequestInit = {}) {
 
 // Только админы (ADMIN_USERS=valera,... — harness ids or emails; OIDC_ADMIN_GROUPS) и только со своего домена.
 export async function requireAdmin(req: Request): Promise<Response | null> {
-  const session = await auth.api.getSession({ headers: req.headers }).catch(() => null);
+  const session = await sessionFromHeaders(req.headers);
   if (!session) return Response.json({ error: "unauthorized" }, { status: 401 });
   if (!isAdminUser(session.user)) return Response.json({ error: "forbidden" }, { status: 403 });
   if (req.method !== "GET" && req.headers.get("origin") !== process.env.PUBLIC_URL) return Response.json({ error: "bad origin" }, { status: 403 });

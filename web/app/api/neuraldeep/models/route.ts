@@ -1,6 +1,6 @@
 // Чатовые модели ключа NeuralDeep (GET /v1/models через egress). Ключ приходит из браузера (он лежит в config.toml
 // codex этого пользователя) и нигде в морде не сохраняется.
-import { auth } from "@/lib/auth";
+import { sessionFromHeaders } from "@/lib/auth";
 import { viaEgress } from "@/lib/proxy";
 
 export const dynamic = "force-dynamic";
@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 const notChat = /embed|^e5-|bge|frida|rerank|whisper|gigaam|tts|diariz|lyria|decision|clef|image|upscale|background|enhance|avatar|speech|ocr|search|music|^audio/i;
 
 export async function POST(req: Request) {
-  const session = await auth.api.getSession({ headers: req.headers }).catch(() => null);
+  const session = await sessionFromHeaders(req.headers);
   if (!session) return Response.json({ error: "unauthorized" }, { status: 401 });
   if (req.headers.get("origin") !== process.env.PUBLIC_URL) return Response.json({ error: "bad origin" }, { status: 403 });
 

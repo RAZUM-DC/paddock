@@ -1,12 +1,12 @@
 // Is this user's harness there? GET → {state: "ready" | "preparing" | "failed" | "unmanaged"}; POST → the same, and
 // retries a failed preparation. Only meaningful with PROVISIONER_URL; otherwise always "unmanaged".
-import { auth, harnessIdOf } from "@/lib/auth";
+import { harnessIdOf, sessionFromHeaders } from "@/lib/auth";
 import { harnessState } from "@/lib/provision";
 
 export const dynamic = "force-dynamic";
 
 async function answer(req: Request, retry: boolean) {
-  const session = await auth.api.getSession({ headers: req.headers }).catch(() => null);
+  const session = await sessionFromHeaders(req.headers);
   if (!session) return Response.json({ error: "unauthorized" }, { status: 401 });
   if (retry && req.headers.get("origin") !== process.env.PUBLIC_URL) return Response.json({ error: "bad origin" }, { status: 403 });
   let id: string;

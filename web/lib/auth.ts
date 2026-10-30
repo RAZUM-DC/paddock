@@ -4,6 +4,8 @@ import { getMigrations } from "better-auth/db/migration";
 import { twoFactor } from "better-auth/plugins";
 import { chooseHarnessId, isAdmin, isValidHarnessId, legacyHarnessId, parseList } from "./identity";
 import { localLoginEnabled, OIDC_PROVIDER_ID, oidcEnv, oidcPlugin, setupOidcTables } from "./oidc";
+import { secondFactorPlugin, secondFactorSessionHooks } from "./second-factor";
+import { cleanupSecondFactor, secondFactorRequired, setupSecondFactorTables } from "./second-factor-core";
 
 const publicUrl = process.env.PUBLIC_URL ?? "http://localhost:3000";
 
@@ -24,10 +26,13 @@ function ensureOwnTables() {
     created_at INTEGER NOT NULL
   )`);
   setupOidcTables(db);
+  setupSecondFactorTables(db);
   ownTables = true;
 }
 
 const oidc = oidcEnv();
+// OIDC_REQUIRE_TOTP (default on with OIDC): an OIDC session needs Paddock's own TOTP before it counts (lib/second-factor.ts).
+export const requireSecondFactor = secondFactorRequired(!!oidc);
 const harnessSalt = process.env.HARNESS_ID_SALT ?? "";
 if (oidc && !harnessSalt) console.warn("HARNESS_ID_SALT is empty: OIDC harness ids are derived from the issuer and subject only");
 
@@ -51,7 +56,12 @@ const options = {
   advanced: { ipAddress: { ipAddressHeaders: ["x-forwarded-for"], trustedProxies: ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] } },
   // 2FA по TOTP (Authy, Google Authenticator, 1Password): включается в Настройки → Вход в морду.
   // Включается сразу после «Включить»: показали QR, пользователь добавил его в Authy — готово, без ввода кода в настройках.
-  plugins: [twoFactor({ issuer: "Paddock", skipVerificationOnEnable: true }), ...(oidc ? [oidcPlugin(db, oidc, publicUrl)] : [])],
+  plugins: [
+    twoFactor({ issuer: "Paddock", skipVerificationOnEnable: true }),
+    ...(oidc ? [oidcPlugin(db, oidc, publicUrl)] : []),
+    ...(oidc && requireSecondFactor ? [secondFactorPlugin(db, OIDC_PROVIDER_ID)] : []),
+  ],
+  ...(oidc && requireSecondFactor ? { databaseHooks: secondFactorSessionHooks(db, OIDC_PROVIDER_ID) } : {}),
 } satisfies BetterAuthOptions;
 
 export const auth = betterAuth(options);
@@ -60,6 +70,18 @@ export async function ensureDb() {
   const { runMigrations } = await getMigrations(options);
   await runMigrations();
   ensureOwnTables();
+  if (requireSecondFactor) cleanupSecondFactor(db);
+}
+
+// The one way Paddock reads a session (pages, API routes, the WS bridge): through better-auth's get-session, which the
+// second-factor gate refuses for a pending session. Errors and refusals are "no session".
+export const sessionFromHeaders = (headers: Headers) => auth.api.getSession({ headers }).catch(() => null);
+
+// For pages: is there a session that only lacks its second factor? (Never true without OIDC_REQUIRE_TOTP.)
+export async function secondFactorStatus(headers: Headers): Promise<{ signedIn: boolean; pending: boolean; enrolled: boolean; email?: string } | null> {
+  if (!oidc || !requireSecondFactor) return null;
+  const api = auth.api as unknown as Record<string, (o: { headers: Headers }) => Promise<unknown>>;
+  return (await api.secondFactorStatus({ headers }).catch(() => null)) as Awaited<ReturnType<typeof secondFactorStatus>>;
 }
 
 // The rule for password users (scripts/create-user.ts checks the name with it before creating the login).

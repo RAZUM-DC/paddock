@@ -4,7 +4,7 @@ import { Agent, createServer, type IncomingHttpHeaders } from "node:http";
 import { readFileSync } from "node:fs";
 import next from "next";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
-import { auth, db, ensureDb, harnessIdOf } from "./lib/auth";
+import { db, ensureDb, harnessIdOf, sessionFromHeaders } from "./lib/auth";
 import { ensureHarness, provisioningEnabled } from "./lib/provision";
 import { createHarnessApi, isHarnessApiPath } from "./lib/harness-api";
 import { gitAccounts, harnessApiEnabled, secretRequests } from "./lib/harness-services";
@@ -42,7 +42,7 @@ server.on("upgrade", async (req, socket, head) => {
   };
   // Cookie-авторизация на WebSocket без проверки Origin открывает CSWSH: пускаем только со своего домена.
   if (!dev && req.headers.origin !== publicUrl) return reject("403 Forbidden");
-  const session = await auth.api.getSession({ headers: toHeaders(req.headers) }).catch(() => null);
+  const session = await sessionFromHeaders(toHeaders(req.headers));
   if (!session) return reject("401 Unauthorized");
 
   let user: string, token: string;

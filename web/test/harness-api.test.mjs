@@ -107,8 +107,13 @@ test("git-credential: the caller's own accounts only, longest prefix, https only
   assert.equal((await q(TOK_BOB, "bob-org/r.git")).json.password, "bob-token-0123456789");
   // git passes paths raw: traversal out of a prefix matches nothing at all.
   assert.equal((await q(TOK_ALICE, "my-org/../other-org/repo.git")).status, 204);
-  // A harness whose owner never signed in to web has no accounts.
-  assert.equal((await q(TOK_NOUSER, "someone/repo.git")).status, 204);
+  // A harness whose owner never signed in to web has no accounts — not even a stray row with an empty user id.
+  git.add("", { host: "github.com", prefix: "", token: "stray-row-token-0123" });
+  try {
+    assert.equal((await q(TOK_NOUSER, "someone/repo.git")).status, 204);
+  } finally {
+    git.removeAll("");
+  }
   assert.equal((await call("GET", "/api/harness/git-credential", { token: TOK_ALICE })).status, 405);
   assert.equal((await call("POST", "/api/harness/git-credential", { token: TOK_ALICE, body: "{not json" })).status, 400);
 });

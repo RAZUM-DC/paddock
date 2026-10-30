@@ -182,6 +182,26 @@ test("helper: nothing on no match, http, errors, store/erase, or when switched o
   }
 });
 
+test("helper: never contacts web for anything but https", async () => {
+  let hits = 0;
+  const counting = createServer((req, res) => {
+    hits += 1;
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ username: "u", password: "p" }));
+  });
+  await new Promise((ok) => counting.listen(0, "127.0.0.1", ok));
+  try {
+    const env = { PADDOCK_WEB_URL: `http://127.0.0.1:${counting.address().port}` };
+    for (const input of ["protocol=http\nhost=github.com\npath=a/b\n", "protocol=ssh\nhost=github.com\n", "host=github.com\npath=a/b\n", "protocol=https\npath=a/b\n"])
+      assert.equal((await helper("get", input, env)).out, "", input);
+    assert.equal(hits, 0);
+    assert.equal((await helper("get", "protocol=https\nhost=github.com\npath=a/b\n", env)).out, "username=u\npassword=p\n");
+    assert.equal(hits, 1);
+  } finally {
+    counting.close();
+  }
+});
+
 test("helper: ignores HTTP(S)_PROXY and talks to web directly", async () => {
   const r = await helper("get", "protocol=https\nhost=github.com\npath=x/y\n", { HTTP_PROXY: "http://127.0.0.1:1", HTTPS_PROXY: "http://127.0.0.1:1", http_proxy: "http://127.0.0.1:1", NODE_USE_ENV_PROXY: "1" });
   assert.equal(r.out, "username=x-access-token\npassword=alice-any-token\n");

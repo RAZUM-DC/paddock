@@ -71,6 +71,10 @@ test("resolveInWorkspace: inside the workspace after symlinks, folder must exist
     for (const bad of ["../../outside/x.env", join(outside, "y.env"), "/etc/passwd", "out-dir/y.env", "out.env", "dangling.env", "missing-dir/.env", ".", "..", "", "a\nb"])
       assert.ok(r(bad) instanceof Error, bad);
     assert.ok(resolveInWorkspace(".env", { cwd: base, root }) instanceof Error);
+    // A sibling whose name starts with the workspace's name is still outside.
+    mkdirSync(join(base, "workspace-evil"));
+    assert.ok(r(join(base, "workspace-evil", ".env")) instanceof Error);
+    assert.ok(r("../../workspace-evil/.env") instanceof Error);
     assert.ok(resolveInWorkspace(".env", { cwd: root, root: join(base, "missing") }) instanceof Error);
   } finally {
     rmSync(base, { recursive: true });

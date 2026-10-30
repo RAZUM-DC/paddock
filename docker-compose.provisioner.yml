@@ -8,12 +8,28 @@
 # - Harnesses made by add-user.sh keep working on `core` as before; both kinds can run side by side.
 #
 # Secrets (not in git):
-#   secrets/provisioner.env  PROVISIONER_TOKEN=<openssl rand -hex 32>  (+ optional HARNESS_*, LLM_*, MCP_SERVERS_JSON)
+#   secrets/provisioner.env  PROVISIONER_TOKEN=<openssl rand -hex 32>  (+ optional HARNESS_*, LLM_*, MCP_SERVERS_JSON,
+#                            MAX_HARNESSES, DOCKER_API_VERSION)
 #   secrets/web.env          PROVISIONER_URL=http://provisioner:8080  PROVISIONER_TOKEN=<the same value>
 #   secrets/user-env/<id>.env  optional per-user env for the harness (e.g. LLM_API_KEY=...)
 # The harness image must exist locally: docker compose --profile images build harness-image
 
 networks:
+  # Fixed Linux bridge names (host firewall: docs/razum/g017-host-firewall.md) and a fixed core subnet, so the edge
+  # can have a static address that web trusts for X-Forwarded-For (TRUSTED_PROXIES). Changing driver_opts or ipam of
+  # an existing network needs `docker compose down` (volumes are kept) before `up`.
+  core:
+    driver_opts:
+      com.docker.network.bridge.name: pd-core
+    ipam:
+      config:
+        - subnet: ${PADDOCK_CORE_SUBNET:-172.20.1.0/24}
+  outside:
+    driver_opts:
+      com.docker.network.bridge.name: pd-out
+    ipam:
+      config:
+        - subnet: ${PADDOCK_OUTSIDE_SUBNET:-172.20.2.0/24}
   # web ↔ provisioner only. internal: no way out; neither egress nor any harness is ever attached, so nothing a
   # harness can steer (its own traffic, or the egress proxy) can reach the provisioner.
   control:
@@ -22,6 +38,8 @@ networks:
   # (docs/services/egress/gost.example.yaml, hardened variant). Change it if it overlaps a network you have.
   egress-api:
     internal: true
+    driver_opts:
+      com.docker.network.bridge.name: pd-eapi
     ipam:
       config:
         - subnet: ${PADDOCK_EGRESS_API_SUBNET:-10.254.254.0/29}
@@ -34,6 +52,15 @@ services:
       # The gost API through `egress-api` (the alias exists on no user network).
       GOST_API: http://egress-api:18080/api
       NO_PROXY: localhost,127.0.0.1,web,egress,egress-api,provisioner
+      # Only the edge may pass X-Forwarded-For (lib/client-ip.ts); add the proxy in front of the edge to
+      # TRUSTED_PROXY_HOPS in secrets/web.env (the address the edge sees it connect from).
+      TRUSTED_PROXIES: 127.0.0.1,::1,${PADDOCK_EDGE_IP:-172.20.1.250}
+
+  edge:
+    networks:
+      core:
+        ipv4_address: ${PADDOCK_EDGE_IP:-172.20.1.250}
+      outside: {}
 
   egress:
     container_name: paddock-egress

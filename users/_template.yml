@@ -27,8 +27,14 @@ services:
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     mem_limit: 6g
+    memswap_limit: 6g
     cpus: 4
-    pids_limit: 1024
+    pids_limit: 512
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
 
 volumes:
   harness-home-__USER__: {}

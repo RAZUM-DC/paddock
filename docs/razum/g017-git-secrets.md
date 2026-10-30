@@ -26,20 +26,27 @@ typed by the human into a masked form and land in a file, never in the transcrip
   label. The list shows label, host, prefix, username, last 4 characters of the token and the date. The help text asks
   for fine-grained, repository-scoped tokens with an expiry, and says the agent can read a token it uses.
 - Storage: table `git_accounts` in the auth db (created on first use, after better-auth's migrations, like the
-  branch's other tables). The token is sealed with AES-256-GCM (`web/lib/secret-box.ts`); the additional data is
-  `git:<user id>:<account id>`, so a ciphertext copied to another row or user does not decrypt. Key:
-  `PADDOCK_SECRETS_KEY` (64 hex) or HKDF-SHA256(`BETTER_AUTH_SECRET`, info `paddock-secrets-v1`).
-- Browser API (session; POST/DELETE only with `Origin === PUBLIC_URL`, any signed-in user, own data only):
-  `GET/POST /api/git/accounts`, `DELETE /api/git/accounts/<id>`. The list never contains tokens. Limits: 20 accounts,
-  token ≤ 4096 characters and single line, host a host name with optional `:port`, prefix `[A-Za-z0-9._/-]{0,200}`
+  branch's other tables). The token is sealed with AES-256-GCM (`web/lib/secret-box.ts`, full 16-byte tag required);
+  the additional data is `["git-v1", user id, account id, host, prefix, username]`, so a ciphertext copied to another
+  row or user, or a row whose host/prefix/username was edited in the database, does not decrypt (no rows exist in
+  production yet, so the change of AAD from the first version needs no migration). Key: `PADDOCK_SECRETS_KEY`
+  (64 hex) or HKDF-SHA256(`BETTER_AUTH_SECRET`, info `paddock-secrets-v1`).
+- Browser API (session; POST/DELETE only with `Origin === PUBLIC_URL`, exactly the rule of `requireAdmin`, so nothing
+  is accepted with `PUBLIC_URL` unset; any signed-in user, own data only): `GET/POST /api/git/accounts`,
+  `DELETE /api/git/accounts/<id>`. The list never contains tokens. Limits: 20 accounts, token 16 to 4096 characters,
+  single line, host a host name with optional `:port`, prefix `[A-Za-z0-9._/-]{0,200}`
   without empty/`.`/`..` segments; one account per (host, prefix).
 - Identity: the browser writes `~/.codex/paddock/gitconfig` through the harness fs API (`[user] name = "…" email = "…"`,
   quotes and backslashes escaped, newlines refused) and reads it back to show the current values.
 - Harness image: `/usr/local/bin/git-credential-paddock` (node, no dependencies, CommonJS) and `/etc/gitconfig` with
   `credential.helper`, `credential.useHttpPath = true` and `[include] path = /home/codex/.codex/paddock/gitconfig`.
+- Offboarding (admins, `requireAdmin`): `GET /api/admin/git-accounts?user=<email or harness id>` → `{accounts: n}`,
+  `DELETE` the same → `{removed: n}`, one JSON log line. No UI; use it with an admin session (curl with the cookie and
+  `Origin: $PUBLIC_URL`).
 - Server: `POST /api/harness/git-credential` (see "Harness API" below): https only, exact host, the longest prefix
-  that covers the path in whole segments (`my-org` does not cover `my-org-evil/…`; `.git` is ignored); `{username,
-  password}` or 204. One JSON log line per call: `{"event":"git-credential","harness","host","account"}`.
+  that covers the path in whole segments (`my-org` does not cover `my-org-evil/…`; `.git` is ignored). git passes the
+  path raw, so a path with empty, `.` or `..` segments, `%`, `?`, `#`, `\` or control characters matches no account at
+  all (`my-org/../other-org/repo.git` used to select the `my-org` account). `{username, password}` or 204. One JSON log line per call: `{"event":"git-credential","harness","host","account"}`.
 
 **2. Secret requests (Paddock tool `secrets`).**
 
@@ -59,8 +66,9 @@ typed by the human into a masked form and land in a file, never in the transcrip
   Browser endpoints: `GET /api/secret-requests` (pending, no values), `POST /api/secret-requests/<id>`
   `{value}` or `{decline:true}` (Origin check).
 - UI (`components/secret-requests.tsx`): polls every 4 s while the page is visible; a card in the visible pane whose
-  thread asked, else in the active pane: chat title, NAME, file, reason, minutes left, password field with show/hide,
-  Save / Decline, and a result line ("Saved. The agent writes it…", "Declined…", or the server's error).
+  thread asked, else in the active pane: chat title, NAME, file, the reason quoted as "The agent says: …", minutes
+  left, a fixed warning (not the agent's text) never to enter Paddock, SSO or corporate account passwords there,
+  password field with show/hide, Save / Decline, and a result line ("Saved. The agent writes it…", "Declined…", or the server's error).
 
 **3. Default tools.** `"default": true` in `tool.json` installs a tool on connect unless the user removed it; removal
 writes `~/.codex/paddock/tools/<id>/removed`, installing again deletes it. Existing tools have no flag and behave as
@@ -69,13 +77,21 @@ before. Settings → Tools shows "on by default".
 **Harness API (`web/lib/harness-api.ts`).** `/api/harness/*` is handled in `server.ts` before Next (Next fills in
 `X-Forwarded-For` itself). A request carrying `X-Forwarded-For`, `Forwarded` or `X-Real-IP` came through a proxy and is
 answered 404; `edge/nginx.conf` also returns 404 for `location /api/harness/`. The caller is authenticated by
-`Authorization: Bearer <token>`: sha256 of the token is compared in constant time with every `TOKENS_DIR/<id>.token`
-(valid harness ids only, tokens ≥ 32 characters), the harness id is mapped to the web user through `harness_users`.
-A harness whose owner never signed in to web has no accounts. 120 requests/min per harness for each of the two
-endpoints. The existing browser route `/api/harness` (no trailing slash) is not affected.
+`Authorization: Bearer <token>`: sha256 of the token is compared in constant time with the sha256 of every
+`TOKENS_DIR/<id>.token` (valid harness ids only, tokens ≥ 32 characters); the digests are cached per directory and
+re-read when the directory changes or after 5 s. The harness id is mapped to the web user through `harness_users`.
+A harness whose owner never signed in to web has no accounts. Before the token is looked at, each client address is
+limited to 600 requests/min, and after 30 failed authentications in a minute it gets 429 for the rest of the minute.
+After it, 120 requests/min per harness for each of the two endpoints. Bodies: ≤ 16 KB (413, also for chunked bodies
+without `Content-Length`), received within 10 s (408); both close the connection. The existing browser route
+`/api/harness` (no trailing slash) is not affected.
 
 **Provisioner.** web is attached to user networks with the alias `web` (`WEB_ALIAS`), so `http://web:3000` resolves
-there as on `core`.
+there as on `core`. A web (or egress) container that is already on a network without its alias — e.g. attached before
+the alias existed; self-deploy restarts web without recreating it, so this does not heal by itself — is found by
+inspecting the container's endpoint and is disconnected and reconnected with the alias, on ensure and in the reconcile
+loop. New harnesses also get `PADDOCK_WEB_URL=http://<WEB_CONTAINER>:<WEB_PORT>` (default
+`http://paddock-web:3000`), which Docker resolves whatever the aliases; a per-user env file cannot override it.
 
 ## Env vars
 
@@ -84,12 +100,13 @@ there as on `core`.
 | web | `PADDOCK_SECRETS_KEY` | derived from `BETTER_AUTH_SECRET` | 64 hex characters (`openssl rand -hex 32`); key for stored git tokens. Changing it (or `BETTER_AUTH_SECRET` without it) makes stored tokens unreadable: they behave as absent and must be added again |
 | web | `PADDOCK_HARNESS_API` | `1` | `0` answers 404 on all of `/api/harness/*` (git credentials and secret requests off) |
 | web | `TOKENS_DIR`, `PUBLIC_URL` | as before | harness tokens; the Origin for browser mutations |
-| harness | `PADDOCK_WEB_URL` | `http://web:3000` | where the helper and the `secrets` tool reach web (plain http, directly) |
+| harness | `PADDOCK_WEB_URL` | `http://web:3000` (provisioned harnesses: `http://paddock-web:3000`, set by the provisioner) | where the helper and the `secrets` tool reach web (plain http, directly) |
 | harness | `PADDOCK_WS_TOKEN_FILE` | `/run/secrets/ws-token` | the harness token they authenticate with |
 | harness | `PADDOCK_GIT_CREDENTIALS` | `1` | `0` turns the credential helper off |
 | harness | `PADDOCK_GIT_DEBUG` | — | `1` prints the helper's errors (never the token) to stderr |
 | harness | `PADDOCK_WORKSPACE` | `/workspace` | root the `secrets` tool accepts files under (the server checks `/workspace`) |
 | provisioner | `WEB_ALIAS` | `web` | web's DNS alias on user networks |
+| provisioner | `WEB_PORT` | `3000` | web's port in the harness's `PADDOCK_WEB_URL` |
 
 ## End to end
 
@@ -120,7 +137,15 @@ the user types the key and saves → the command's 2-second poll collects it onc
 - `credential.useHttpPath = true` is system-wide in the harness image: other credential helpers the user configures
   then also see paths (they would store credentials per repository).
 - Requests and values live in web's memory only: a web restart (self-deploy) drops pending requests; the waiting command
-  then reports `expired`.
+  then reports `expired`. **Decision for the pilot: acceptable** (the agent asks again).
+- The secret form is filled in by the user but *requested* by the agent, which may have been steered by a prompt
+  injection into asking for something else. The card therefore quotes the reason as the agent's words and shows a
+  fixed warning never to enter Paddock, SSO or corporate account passwords.
+- **Key rotation (decision for the pilot):** there is no re-encryption; after a new `PADDOCK_SECRETS_KEY` (or a changed
+  `BETTER_AUTH_SECRET` without it) users add their tokens again. Old rows simply stop matching.
+- **Offboarding:** an admin removes a person's git accounts with `DELETE /api/admin/git-accounts?user=…`. Deleting the
+  web user alone leaves the rows (undecryptable for anyone else, but still present). The tokens themselves should
+  also be revoked at the git host; Paddock cannot do that.
 - Tokens at rest depend on the key in `secrets/web.env`; a stolen auth db alone does not reveal them.
 
 ## Verified here
@@ -128,7 +153,7 @@ the user types the key and saves → the command's 2-second poll collects it onc
 - `cd web && npx tsc --noEmit -p . && node scripts/check-i18n.mjs && npx next build` passes (the build logs the same
   "Database schema mismatch" on an empty db as before). Every commit of the branch typechecks and passes the tests on
   its own.
-- Unit and integration tests: `web` 82 (`npm test`, now `node --import tsx --test`), `provisioner` 29. New:
+- Unit and integration tests: `web` 91 (`npm test`, now `node --import tsx --test`), `provisioner` 32. New:
   `secret-box` (roundtrip, fresh IV, tampering at every part, wrong key/aad, key derivation), `git-accounts`
   (validation, segment-wise prefixes, longest prefix, https only, exact host, store with a temp sqlite, no token in
   list or in clear in the db, 20 limit, cross-user isolation, ciphertext moved between rows), `harness-auth` (bearer
@@ -139,19 +164,28 @@ the user types the key and saves → the command's 2-second poll collects it onc
   a temp sqlite and tokens dir; the real helper as a child process (stdin parsing, output, no output on every failure,
   ignores `HTTP(S)_PROXY` with `NODE_USE_ENV_PROXY=1`, never calls web for non-https, drops answers with line breaks);
   **real `git credential fill`** through the helper; the real `paddock-secret.mjs` end to end (request → fulfil →
-  file, declined, outside the workspace, bad name).
+  file, declined, outside the workspace, bad name). After the review also: raw-path traversal/encoding, AAD binding of
+  host/prefix/username, 16-character tokens, admin user lookup, token digest cache, per-address and failed-auth limits,
+  secret-request rate limit, chunked > 16 KB → 413, slow body → 408 (both close the connection), second fulfil → 409,
+  exclusive temp file, and in the provisioner the "attached without alias" reconnect against the fake Engine API.
 - Live smoke test of the production server (`NODE_ENV=production tsx server.ts`, temp db, two password users): login,
   Git accounts add/list/delete with and without Origin, a foreign user's delete → 404, harness credential for the owner
   and 204 for another harness, `X-Forwarded-For` → 404, `/api/harness` (browser) unaffected, secret request created by a
   harness token and seen/fulfilled/declined through the browser routes (the store is shared between `server.ts` and
   Next), a foreign user → 404, multi-line and empty values → 400, collected once, nothing secret in the server log.
   This found and fixed one bug: `instanceof` across the two module graphs (errors are now matched by name).
+- Second live smoke test after the review fixes: with `PUBLIC_URL` unset, a POST with `Origin: http://localhost:3000`
+  → 403 (accepted before); a 5-character token → 400; `bob-org/../x/r.git` → 204 while `bob-org/r.git` → 200; admin
+  route: non-admin → 403, count by email (any case) and by harness id → 1, DELETE without Origin → 403, with it
+  `{removed: 1}`, then the harness gets 204; no token or harness token in the log.
 
 ## Not verified
 
 - A real `git push`/`clone` over https through egress with a real token, inside the harness image (the image was not
   built: no Docker daemon here). `git credential fill` with the helper was run on the host.
-- The helper inside a provisioned harness on its own network (alias `web`), and `add-user.sh` harnesses on `core`.
+- The helper inside a provisioned harness on its own network (`PADDOCK_WEB_URL=http://paddock-web:3000`, alias `web`),
+  and `add-user.sh` harnesses on `core`; the alias reconnect against a real Docker Engine (only the fake one; in real
+  Docker the aliases are read from `NetworkSettings.Networks[net].Aliases` / `DNSNames`, which differs by API version).
 - The UI in a real browser: the Git tab, the secret card placement, polling, password managers. Only typechecked,
   i18n-checked and built; `tests/*.mjs` (headless, live instance) were not run.
 - That Codex exports `CODEX_THREAD_ID` to shell commands (the existing `agents` tool relies on it; without it the card
@@ -160,12 +194,17 @@ the user types the key and saves → the command's 2-second poll collects it onc
 
 ## Mutation testing
 
-Method as in [g017-mutation.md](g017-mutation.md): one bug at a time in the new security-relevant code, the full `web`
-suite run (`node --import tsx --test test/*.test.mjs`), the file restored. The runner lived outside the repo.
+Method as in [g017-mutation.md](g017-mutation.md): one bug at a time in the new security-relevant code, the full suite of
+the package run (`web`: `node --import tsx --test test/*.test.mjs`; `provisioner`: `node --test`), the file restored.
+The runners lived outside the repo. After the review the whole set was run again on the fixed code, together with
+the reviewer's 18 mutations (A1–A18; A7 split into A7a/A7b because the pattern now occurs in two functions), new
+mutations of the code added by the review fixes (N1–N15) and of the provisioner fix (P1–P5). M13 was rewritten for
+the cached token index (same intent: a token compared only partly).
 
-**Score: 40/40 killed** (38 in the first run; the 2 survivors led to new tests, then killed).
+**Score: 79 mutations, 77 killed, 2 equivalent (N2, A17); every non-equivalent one killed.** Survivors that led to new
+tests: M31 and M36 (first round), N15 (408/413 must close the connection), and the reviewer's A2, A3, A10, A13 and A16.
 
-| # | file | mutation | result | first test that failed |
+| # | file | mutation | result | first test that failed / note |
 |---|---|---|---|---|
 | M1 | `web/lib/secret-box.ts` | additional data (row binding) not used when sealing | killed | store: credentialFor matches only the user's own accounts |
 | M2 | `web/lib/secret-box.ts` | HKDF info string changed | killed | secretsKeyFrom: HKDF-SHA256 of BETTER_AUTH_SECRET with info paddock-secrets-v1 |
@@ -176,10 +215,10 @@ suite run (`node --import tsx --test test/*.test.mjs`), the file restored. The r
 | M7 | `web/lib/git-accounts.ts` | prefix compared as a string prefix, not whole segments | killed | prefixCovers: whole leading segments, .git ignored |
 | M8 | `web/lib/git-accounts.ts` | host matched as a suffix | killed | pickAccount: https only, exact host, longest prefix wins |
 | M9 | `web/lib/git-accounts.ts` | credentialFor considers every user's accounts | killed | store: credentialFor matches only the user's own accounts |
-| M10 | `web/lib/git-accounts.ts` | tokens with line breaks accepted | killed | validToken: 1..4096 characters, single line |
+| M10 | `web/lib/git-accounts.ts` | tokens with line breaks accepted | killed | validToken: 16..4096 characters, single line |
 | M11 | `web/lib/git-accounts.ts` | no limit of 20 accounts | killed | store: limits and duplicates |
 | M12 | `web/lib/git-accounts.ts` | list returns the sealed token too | killed | store: add, list without tokens, last4, delete |
-| M13 | `web/lib/harness-auth.ts` | only the first 32 characters of a token compared | killed | harness authentication: no, wrong, short or unknown tokens get 401 |
+| M13 | `web/lib/harness-auth.ts` | only the first 64 characters of a presented token compared | killed | harnessIdForToken: the token file decides which harness is calling |
 | M14 | `web/lib/harness-auth.ts` | token file names not validated as harness ids | killed | harnessIdForToken: the token file decides which harness is calling |
 | M15 | `web/lib/harness-auth.ts` | minimum token length dropped (both checks) | killed | harnessIdForToken: the token file decides which harness is calling |
 | M16 | `web/lib/harness-auth.ts` | bearer regex unanchored | killed | bearerOf |
@@ -197,21 +236,78 @@ suite run (`node --import tsx --test test/*.test.mjs`), the file restored. The r
 | M28 | `web/lib/secret-requests.ts` | .. segments allowed in the file path | killed | create: name, file and reason are validated |
 | M29 | `web/lib/secret-requests.ts` | value size limit counted in characters, not bytes | killed | validFile and validateValue |
 | M30 | `web/tools/secrets/paddock-secret.mjs` | folder symlinks not resolved | killed | resolveInWorkspace: inside the workspace after symlinks, folder must exist |
-| M31 | `web/tools/secrets/paddock-secret.mjs` | workspace check without the path separator | **survived → killed** after a new test | resolveInWorkspace: inside the workspace after symlinks, folder must exist |
+| M31 | `web/tools/secrets/paddock-secret.mjs` | workspace check without the path separator | killed | resolveInWorkspace: inside the workspace after symlinks, folder must exist |
 | M32 | `web/tools/secrets/paddock-secret.mjs` | name regex in .env upsert not anchored | killed | upsertEnvLine: append, replace in place, drop duplicates, keep the rest |
 | M33 | `web/tools/secrets/paddock-secret.mjs` | single quotes used even when the value contains one | killed | quoteValue: bare when plain, single quotes, else escaped double quotes; line breaks refused |
 | M34 | `web/tools/secrets/paddock-secret.mjs` | output file mode 644 instead of 600 | killed | secrets command: request → user saves → NAME=value in the file (600), output without the value |
 | M35 | `codex/git-credential-paddock` | answer with a line break passed to git | killed | helper: an answer with a line break is dropped; the token never reaches stderr |
-| M36 | `codex/git-credential-paddock` | helper asks web for http remotes too | **survived → killed** after a new test | helper: never contacts web for anything but https |
+| M36 | `codex/git-credential-paddock` | helper asks web for http remotes too | killed | helper: never contacts web for anything but https |
 | M37 | `codex/git-credential-paddock` | helper uses the default (proxy-aware) agent | killed | helper: ignores HTTP(S)_PROXY and talks to web directly |
 | M38 | `web/lib/git-identity.ts` | double quotes not escaped in the identity file | killed | identityConfig escapes quotes and backslashes; real git reads back the same values |
 | M39 | `web/lib/tools.ts` | removal of a default tool not remembered | killed | a default tool the user removed stays removed; installing it again clears that |
 | M40 | `web/lib/tools.ts` | every tool installed on connect | killed | a default tool is installed on connect, others are not |
+| N1 | `web/lib/git-accounts.ts` | % (percent-encoding) allowed in repository paths | killed | pathSegments / prefixCovers: raw paths with traversal or encoding match nothing |
+| N2 | `web/lib/git-accounts.ts` | an unclean path still matches accounts without a prefix | **equivalent** | `prefixCovers` already refuses an unclean path for every prefix; the check in `pickAccount` is defence in depth |
+| N3 | `web/lib/git-accounts.ts` | minimum token length back to 1 | killed | validToken: 16..4096 characters, single line |
+| N4 | `web/lib/git-accounts.ts` | AAD without the host | killed | store: editing host, prefix or username in the database makes the token undecryptable |
+| N5 | `web/lib/git-accounts.ts` | AAD without the username | killed | store: editing host, prefix or username in the database makes the token undecryptable |
+| N6 | `web/lib/harness-api.ts` | no per-address limit before the token check | killed | per address: all requests and failed authentications are limited before the token is looked at |
+| N7 | `web/lib/harness-api.ts` | failed authentications never block | killed | per address: all requests and failed authentications are limited before the token is looked at |
+| N8 | `web/lib/harness-api.ts` | failed authentications not counted | killed | per address: all requests and failed authentications are limited before the token is looked at |
+| N9 | `web/lib/harness-auth.ts` | token cache ignores directory changes | killed | harnessIdForToken: digests are cached; a new or removed file is seen at once, an in-place rewrite after the TTL |
+| N10 | `web/lib/harness-api.ts` | no body read timeout | killed |  |
+| N11 | `web/lib/harness-auth.ts` | admin lookup by email case-sensitive | killed | findUserId: by harness id or email (case-insensitive), nothing else |
+| N12 | `web/lib/git-accounts.ts` | revoke removes every user's accounts | killed | store: removeAll and count, per user |
+| N13 | `web/lib/git-accounts.ts` | pathSegments accepts empty segments | killed | pathSegments / prefixCovers: raw paths with traversal or encoding match nothing |
+| N14 | `web/lib/git-accounts.ts` | pathSegments accepts .. | killed | pathSegments / prefixCovers: raw paths with traversal or encoding match nothing |
+| N15 | `web/lib/harness-api.ts` | 408/413 keep the connection open | **survived → killed** after a new test | bodies: chunked over 16 KB without Content-Length → 413; a body that never ends → 408 |
+| A1 | `web/lib/harness-api.ts` | `Forwarded` not treated as proxied | killed | a request that came through a proxy … is answered 404 |
+| A2 | `web/lib/harness-api.ts` | secret-request rate limit not applied | **survived (review) → killed** after a new test | secret requests are rate limited per harness |
+| A3 | `web/lib/harness-api.ts` | body size not limited while reading | **survived (review) → killed** after a new test | bodies: chunked over 16 KB without Content-Length → 413 … |
+| A4 | `web/lib/harness-auth.ts` | harness → user lookup returns another user | killed | git-credential: the caller's own accounts only … |
+| A5 | `web/lib/secret-box.ts` | all-zero IV | killed | every seal uses a fresh IV |
+| A6 | `web/lib/git-accounts.ts` | delete ignores the owner | killed | store: add, list without tokens, last4, delete |
+| A7a | `web/lib/git-accounts.ts` | `.`/`..` allowed in account prefixes | killed | normalizePrefix: whole segments, slashes trimmed, no traversal |
+| A7b | `web/lib/git-accounts.ts` | `.`/`..` allowed in request paths | killed | pathSegments / prefixCovers: raw paths with traversal or encoding match nothing |
+| A8 | `web/lib/secret-requests.ts` | pending list ignores the owner | killed | secret requests: harness creates, user fulfils … isolation |
+| A9 | `web/lib/secret-requests.ts` | pending limit counted across owners | killed | at most 5 pending per owner; answered ones free a slot |
+| A10 | `web/lib/secret-requests.ts` | a fulfilled request can be fulfilled again | **survived (review) → killed** after a new test | the value is handed out exactly once, then wiped |
+| A11 | `web/lib/secret-requests.ts` | workspace prefix without `/` | killed | create: name, file and reason are validated |
+| A12 | `web/tools/secrets/paddock-secret.mjs` | non-regular target file accepted | killed | resolveInWorkspace: inside the workspace after symlinks … |
+| A13 | `web/tools/secrets/paddock-secret.mjs` | temp file opened with `w` instead of `wx` | **survived (review) → killed** after a new test | writeSecretFile: creates with mode 600 … |
+| A14 | `codex/git-credential-paddock` | stdin parsing continues past the blank line | killed | helper: an answer with a line break is dropped … |
+| A15 | `web/lib/git-accounts.ts` | ports above 65535 accepted | killed | normalizeHost: host names with an optional port, nothing else |
+| A16 | `web/lib/harness-api.ts` | a harness without a user queries user id "" | **survived → killed** after a new test | git-credential: the caller's own accounts only … |
+| A17 | `web/lib/secret-box.ts` | minimum ciphertext length check removed | **equivalent** | with `authTagLength: 16` a short buffer fails in `setAuthTag` anyway |
+| A18 | `web/lib/harness-api.ts` | proxied requests not refused (= M17) | killed | a request that came through a proxy … is answered 404 |
+| P1 | `provisioner/lib.mjs` | missingAliases always empty (attached web never fixed) | killed | missingAliases: from the container's endpoint on that network |
+| P2 | `provisioner/server.mjs` | web connected without the alias | killed | ensure creates network, attachments, volumes, token and container, then reports ready |
+| P3 | `provisioner/lib.mjs` | no PADDOCK_WEB_URL in the harness env | killed | containerCreateBody: same command and hardening as users/_template.yml, own network only |
+| P4 | `provisioner/server.mjs` | attached container with a missing alias is not disconnected first | killed | web already on a user network without its alias is reconnected with it |
+| P5 | `provisioner/lib.mjs` | DNSNames ignored (alias only from Aliases) | killed | missingAliases: from the container's endpoint on that network |
 
-Not mutated: the browser routes' session and Origin checks (`requireUser` in `web/lib/harness-services.ts`) need a live
-better-auth; they were exercised in the smoke test above (403 without Origin, 401 without a session, 404 for another
-user's account or request). Each of the two token-length checks in `harnessIdForToken` alone is redundant with the
-other (defence in depth); M15 removes both.
+Not mutated: the browser routes' session and Origin checks (`requireUser` in `web/lib/harness-services.ts`, the admin
+route behind `requireAdmin`) need a live better-auth; they were exercised in the smoke test (403 without Origin, 401
+without a session, 404 for another user's account or request). Each of the two token-length checks in the token
+index alone is redundant with the other (defence in depth); M15 removes both.
+
+## Review findings (2026-10-30) and what was done
+
+| # | finding | fix |
+|---|---|---|
+| 1 | web already on a user network never got the `web` alias | provisioner inspects the container's endpoint and reconnects it with the missing alias (ensure + reconcile); new harnesses also get `PADDOCK_WEB_URL=http://paddock-web:3000` (reserved env); test for the "attached without alias" case |
+| 2 | raw path `my-org/../other-org/repo.git` selected the `my-org` account | `pathSegments` refuses empty/`.`/`..` segments, `%`, `?`, `#`, `\`, control characters; such a path matches no account at all; unit + end-to-end tests |
+| 3 | 1-character tokens accepted, last 4 shown | minimum 16 characters (UI button disabled below that too) |
+| 4 | AAD bound only user and row | AAD = `["git-v1", user, id, host, prefix, username]`; tests edit each column in the db. No production rows exist yet, so no migration |
+| 5 | Origin fallback to `http://localhost:3000` | exactly the `requireAdmin` rule: with `PUBLIC_URL` unset no mutation is accepted |
+| 6 | unauthenticated requests read every token file before any limit | per-address limit (600/min) and failed-auth limit (30/min, then 429) before the token is looked at; token digests cached per directory (mtime + 5 s TTL) |
+| 7 | secret card could be used to phish account passwords | reason shown as "The agent says: …"; fixed RU/EN warning never to enter Paddock/SSO/corporate passwords |
+| 8 | no read timeout for bodies | 10 s → 408, connection closed (also on 413) |
+| — | tests for review survivors | secret-request rate limit, chunked > 16 KB without Content-Length → 413, second fulfil → 409, temp file with `wx` (planted symlink not followed) |
+| — | extra | full 16-byte GCM tag required (`authTagLength`) |
+
+Decisions for the pilot: key rotation = users add their tokens again; offboarding = the admin-only revoke above (tokens
+must also be revoked at the git host); pending secret requests lost on a web restart = acceptable.
 
 ## Commits and upstream PRs
 
@@ -228,15 +324,24 @@ other (defence in depth); M15 removes both.
 | c8fe0f4 | `"default": true` tools | PR C (independent, small) |
 | 9d88575 | `secrets` tool, masked form, end-to-end test | PR B (needs PR C for "on by default", A's helper for its test) |
 | e71bb1b | tests from mutation testing | squash into A/B |
+| 5ac5b92 | provisioner: reconnect web with its alias; `PADDOCK_WEB_URL` by container name | with b5fd306 |
+| e305fb8 | git accounts: raw-path hygiene, 16+ character tokens, AAD with host/prefix/username | squash into bc15de5 (PR A) |
+| 461f00b | admin-only revoke of a user's git accounts | PR A |
+| edafb58 | Origin check exactly like `requireAdmin` | squash into 6445c95 |
+| ebfa4de | per-address limits before the token, token digest cache, body timeout | squash into 6445c95 |
+| e663fd5 | tests: second fulfil, exclusive temp file | squash into A/B |
+| 50d0989 | secret card: agent's words, fixed password warning | squash into 9d88575 (PR B) |
+| fc4dfc2 | full 16-byte GCM tag | squash into bc15de5 |
+| 01142af | service docs: admin revoke, `PADDOCK_WEB_URL` | with A / the provisioner PR |
+| 20f2f4b, 226b1ed | tests from the second mutation run | squash into A/B |
 
 No commit contains company names, domains or secrets. This document (`docs/razum/`) is fork-only.
 
 ## Open questions
 
-- Key rotation: there is no re-encryption command; a new `PADDOCK_SECRETS_KEY` means re-adding tokens. Worth a
-  `scripts/rotate-secrets-key.ts`?
-- Should an admin be able to see (not read) every user's accounts, or revoke them on offboarding? Today deleting the
-  web user leaves `git_accounts` rows (unreadable to anyone but that user id).
+- Key rotation: decided for the pilot (users add tokens again). A `scripts/rotate-secrets-key.ts` later?
+- Offboarding: the admin revoke exists as an API only; an admin UI, and removing the rows automatically when a web
+  user is deleted, are TODO.
 - SSH remotes are out of scope (https only). Rewrite `git@github.com:` to https with `url.<base>.insteadOf` in the
   image's gitconfig?
-- Should secret requests survive a web restart (sqlite with the same sealing), or is "expired, ask again" enough?
+- Secret requests lost on a web restart: decided acceptable for the pilot.

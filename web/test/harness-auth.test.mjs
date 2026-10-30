@@ -5,7 +5,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { bearerOf, harnessIdForToken, MIN_TOKEN, rateLimiter, userIdOfHarness } from "../lib/harness-auth.ts";
+import { bearerOf, findUserId, harnessIdForToken, MIN_TOKEN, rateLimiter, userIdOfHarness } from "../lib/harness-auth.ts";
 
 const hex = (c) => c.repeat(64);
 function tokensDir() {
@@ -72,4 +72,16 @@ test("rateLimiter: max per window per key", () => {
   assert.equal(allow("a"), false);
   t = 60_000;
   assert.equal(allow("a"), true);
+});
+
+test("findUserId: by harness id or email (case-insensitive), nothing else", () => {
+  const db = new Database(":memory:");
+  assert.equal(findUserId(db, "alice"), null);
+  db.exec(`CREATE TABLE harness_users (user_id TEXT PRIMARY KEY, harness_id TEXT NOT NULL UNIQUE, created_at INTEGER NOT NULL);
+    CREATE TABLE "user" ("id" TEXT PRIMARY KEY, "email" TEXT NOT NULL)`);
+  db.prepare("INSERT INTO harness_users VALUES (?, ?, ?)").run("user-1", "alice", 1);
+  db.prepare(`INSERT INTO "user" VALUES (?, ?)`).run("user-2", "Bob.Smith@Example.com");
+  assert.equal(findUserId(db, "alice"), "user-1");
+  assert.equal(findUserId(db, "bob.smith@example.com"), "user-2");
+  for (const bad of ["", " ", "bob", "%", "bob.smith@example", "Alice"]) assert.equal(findUserId(db, bad), null, bad);
 });

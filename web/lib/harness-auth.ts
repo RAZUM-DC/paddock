@@ -71,3 +71,17 @@ export function rateLimiter(max: number, windowMs = 60_000, now: () => number = 
     return h.n <= max;
   };
 }
+
+// An admin names a user by email or harness id (offboarding): their web user id, or null.
+export function findUserId(db: Database.Database, who: string): string | null {
+  const w = who.trim();
+  if (!w || w.length > 320) return null;
+  try {
+    const byHarness = isValidHarnessId(w) ? (db.prepare("SELECT user_id FROM harness_users WHERE harness_id = ?").get(w) as { user_id: string } | undefined) : undefined;
+    if (byHarness) return byHarness.user_id;
+    const byEmail = w.includes("@") ? (db.prepare(`SELECT "id" FROM "user" WHERE lower("email") = lower(?)`).get(w) as { id: string } | undefined) : undefined;
+    return byEmail?.id ?? null;
+  } catch {
+    return null;
+  }
+}

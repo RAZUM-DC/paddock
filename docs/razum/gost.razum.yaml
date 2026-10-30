@@ -1,15 +1,15 @@
 # secrets/egress/gost.yaml for docker-compose.yml + docker-compose.provisioner.yml (gost v3, image gogost/gost:3.3.2).
 # Generic: replace the two nameserver placeholders and the API password; nothing else is site-specific.
 #
-# Checked against the gost v3.3.2 source (go-gost/x v0.27.2, go-gost/core v0.6.1); NOT run against a gost binary
-# here (no Docker daemon, building gost was not permitted). Smoke test after deploying, from the web container:
+# Checked against the gost v3.3.2 source (go-gost/x v0.27.2, go-gost/core v0.6.1) and on the real image in production
+# (the API as a `type: api` service does not answer in 3.3.2, hence the top-level `api:`). Smoke test, from web:
 #   curl -sx http://egress:8080 -o /dev/null -w '%{http_code}\n' https://example.com                  # 200
 #   curl -sx http://egress:8080 -o /dev/null -w '%{http_code}\n' http://10.0.0.1/                     # 403 (bypass)
 #   curl -sx http://egress:8080 -o /dev/null -w '%{http_code}\n' http://[::ffff:172.20.1.1]/          # 403 (bypass)
 #   curl -sx http://egress:8080 -o /dev/null -w '%{http_code}\n' http://localhost./                   # 403 (bypass)
 #   curl -sx http://egress:8080 -o /dev/null -w '%{http_code}\n' http://harness-u-000000000000:4500/  # 403 (bypass)
 #   curl -s -u "$GOST_API_USER:$GOST_API_PASS" http://egress-api:18080/api/config >/dev/null && echo api-ok
-# and from a harness: `curl -m5 http://egress:18080/api/config` must fail (connection closed by admission, before auth).
+# and from a harness: `curl -m5 http://egress:18080/api/config` must time out (dropped by the host firewall, rules 2/3).
 #
 # WHAT THIS FILE COVERS (source references are go-gost/x v0.27.2)
 # - The http handler checks the bypass against the target AS REQUESTED (CONNECT host:port or the Host of a plain
@@ -37,7 +37,10 @@
 #   name with an A record of 10.x / 169.254.169.254): gost resolves AFTER the bypass check and never re-checks the
 #   resolved IP (chain/router.go dial: xnet.Resolve then dial; route.go: same). gost v3.3.2 cannot filter on resolved
 #   addresses for a direct (chainless) service. This MUST be covered on the host: nft drops new connections from the
-#   pd-out bridge to private ranges (docs/razum/g017-host-firewall.md, rule 1 in paddock-guard.nft).
+#   pd-out bridge to private ranges (rule 1 in paddock-guard.nft), and new connections egress opens on pd-core (its
+#   static PADDOCK_EGRESS_IP) and on user bridges (its fixed EGRESS_MAC) (rules 2/3; docs/razum/g017-host-firewall.md).
+# - The API port 18080: the top-level `api:` listens on every interface of egress (core, outside, every user network).
+#   Only the password protects it inside gost; the host firewall allows 18080 only on pd-eapi (web).
 # - Probe ports (:18100+, created by web only when a proxy chain is configured) have no bypass.
 # - The proxy port is shared by every user network (egress sits on all of them). The bypass refuses harness targets
 #   by name and private literals; the host firewall refuses the rest.
@@ -58,23 +61,17 @@ services:
     listener:
       type: tcp
 
-  # The gost web API as a service (instead of a top-level `api:` block, which would listen on every network egress is
-  # attached to, i.e. on every user network). Admission runs on accept, before any HTTP or auth: only the egress-api
-  # network (PADDOCK_EGRESS_API_SUBNET in docker-compose.provisioner.yml) gets in; web is the only other member and
-  # reaches it as http://egress-api:18080/api. Keep both subnets in sync if you change one.
-  - name: api
-    addr: ":18080"
-    admission: egress-api-only
-    handler:
-      type: api
-      auth:
-        username: hub
-        password: CHANGE_ME_TO_A_LONG_RANDOM_PASSWORD   # = GOST_API_PASS in secrets/web.env; GOST_API_USER=hub
-      metadata:
-        pathPrefix: /api
-        accessLog: false
-    listener:
-      type: tcp
+# The gost web API. In gost 3.3.2 only this top-level block serves it: a service with `handler: {type: api}` accepts
+# the connection and closes it with an empty reply (with or without auth/admission), so the API cannot be limited to
+# one network inside gost. It listens on every interface of egress; web uses http://egress-api:18080/api over the
+# egress-api network, and the host firewall drops 18080 everywhere else (paddock-guard.nft rules 2 and 3).
+api:
+  addr: ":18080"
+  pathPrefix: /api
+  accesslog: false
+  auth:
+    username: hub
+    password: CHANGE_ME_TO_A_LONG_RANDOM_PASSWORD   # = GOST_API_PASS in secrets/web.env; GOST_API_USER=hub
 
 admissions:
   - name: clients-private-only
@@ -84,10 +81,6 @@ admissions:
       - 172.16.0.0/12
       - 192.168.0.0/16
       - 127.0.0.0/8
-  - name: egress-api-only
-    whitelist: true
-    matchers:
-      - 10.254.254.0/29
 
 resolvers:
   - name: public

@@ -52,7 +52,8 @@ the self-deploying web image.
    It also adds an internal `egress-api` network with a fixed subnet, so web reaches the gost API there and the API
    can admit only that subnet. It also adds a build-only `harness-image` service.
 6. **Egress example** `docs/services/egress/gost.example.yaml`: direct outbound, private targets refused, admission
-   for private clients, an API block with a placeholder password, and a hardened API variant (marked to verify).
+   for private clients, an API block with a placeholder password. (The "hardened" API-as-a-service variant does not
+   work in gost 3.3.2 and was removed; port 18080 is fenced by the host firewall instead.)
 7. **Image build option** `web/Dockerfile.prod`: the app is built at image build time and the container runs
    `tsx server.ts`, with no supervisor and no `/src`. Separately, `SELF_DEPLOY=0` makes the supervisor build once
    and ignore deploy requests.
@@ -89,8 +90,8 @@ From an independent review ("enable with fixes"):
   - The edge has a static core address (`PADDOCK_EDGE_IP`).
   - A user network made before this change is kept and logged once as `WARNING … is not on bridge pu…`.
 - **Egress / host.**
-  - [gost.razum.yaml](gost.razum.yaml): a deny-list bypass with `resolver: public`, and the API as a service
-    admitted only from `egress-api`.
+  - [gost.razum.yaml](gost.razum.yaml): a deny-list bypass with `resolver: public`, and the top-level `api:`. A
+    `type: api` service accepts and closes in 3.3.2 (seen in production), so the API cannot be limited inside gost.
   - [paddock-guard.nft](paddock-guard.nft) with its namespace test.
   - The address pool, br_netfilter and the network switch procedure are in
     [g017-host-firewall.md](g017-host-firewall.md).
@@ -98,7 +99,13 @@ From an independent review ("enable with fixes"):
   - P06: a body over 4 KB gets 413.
   - P11: a container with a foreign `paddock.user` label is never started.
   - P15: none of the reserved env vars can be overridden.
-- **Mutation testing of the new lines: 47 mutants, 45 killed.**
+- **After the production rollout:**
+  - `control` gets a fixed subnet.
+  - The gost API moves back to the top-level `api:`.
+  - Egress's own connections on internal bridges are dropped: a static core IP, plus a fixed MAC that the
+    provisioner sets on user networks and reconnects once. This closed DNS rebinding to a legacy harness on core.
+    The same hole existed on user bridges and is closed the same way.
+- **Mutation testing of the new lines: 54 mutants, 52 killed** (including 7 for `EGRESS_MAC`).
   - Provisioner (20): id regexp, bridge name/option, swap, logs, pids default, API version (default, validation,
     passed to the client), `MAX_HARNESSES` (validation, off-by-one, pre-check, serialisation, counting stopped and
     only managed containers), the old-network warning, and the ownership label guard (P11).
@@ -138,7 +145,10 @@ From an independent review ("enable with fixes"):
 | provisioner | `TOKENS_DIR`, `HOST_TOKENS_DIR`, `USER_ENV_DIR`, `WEB_CONTAINER`, `EGRESS_CONTAINER`, `RECONCILE_INTERVAL_MS`, `PULL_MISSING_IMAGE` | see `docs/services/provisioner/README.md` | |
 | provisioner | `LLM_PROVIDER_NAME`, `LLM_PROVIDER_LABEL`, `LLM_BASE_URL`, `LLM_WIRE_API` (`responses`), `LLM_DEFAULT_MODEL`, `LLM_API_KEY_ENV` (`LLM_API_KEY`) | — | seed `[model_providers.<name>]` with `env_key` |
 | provisioner | `MCP_SERVERS_JSON` | — | `[{"id","url","bearer_env"}]` → `[mcp_servers.<id>] url, bearer_token_env_var` |
-| compose | `PADDOCK_EGRESS_API_SUBNET` | `10.254.254.0/29` | must match the API admission in the gost config |
+| compose | `PADDOCK_EGRESS_API_SUBNET` | `10.254.254.0/29` | web ↔ gost API (bridge `pd-eapi`) |
+| compose | `PADDOCK_CONTROL_SUBNET` | `172.20.9.0/24` | web ↔ provisioner; every compose network has a fixed subnet (a pooled one can collide with a parallel create: "Pool overlaps") |
+| compose | `PADDOCK_EGRESS_IP` | `172.20.1.251` | egress's static core address; `EGRESS_CORE_IP` in paddock-guard.nft |
+| provisioner | `EGRESS_MAC` | `02:00:00:00:00:e1` | egress's MAC on every user network (`""` = Docker's); `EGRESS_MAC` in paddock-guard.nft |
 | compose | `PADDOCK_CORE_SUBNET` / `PADDOCK_OUTSIDE_SUBNET` | `172.20.1.0/24` / `172.20.2.0/24` | bridges `pd-core` / `pd-out` (egress-api: `pd-eapi`) |
 | compose | `PADDOCK_EDGE_IP` | `172.20.1.250` | the edge's static address on core, trusted by web |
 
@@ -168,7 +178,7 @@ Without any `users/*.yml` the base compose file still works; `add-user.sh` users
 
 - `cd web && npx tsc --noEmit -p . && node scripts/check-i18n.mjs && npx next build` passes. The build logs
   "Database schema mismatch" during page-data collection on an empty database; upstream `e7bd2d6` logs the same.
-- Unit tests (as of the provision fixes): `web` 150 (`npm test`), `provisioner` 41 (`npm test`, including server.mjs against a fake Docker Engine API
+- Unit tests (as of the provision fixes): `web` 150 (`npm test`), `provisioner` 43 (`npm test`, including server.mjs against a fake Docker Engine API
   on a unix socket: auth, validation, idempotency, concurrency, missing image, reconcile, recreate).
 - Mutation testing: see [g017-mutation.md](g017-mutation.md).
 - **OIDC end to end against a mock IdP** (local HTTP server with discovery, JWKS, RS256 id_tokens, PKCE check,
@@ -215,8 +225,8 @@ Without any `users/*.yml` the base compose file still works; `add-user.sh` users
   (30 days) unless the user logs in again or is removed from the allowed groups.
 - The egress proxy port is shared by all users (web and egress sit on every user network). Without a bypass for
   private targets, it is a bridge between user networks (harnesses still require their own token). `gost.razum.yaml`
-  refuses private targets and container names, and admits the gost API only from `egress-api`; the host rules close
-  rebinding and intra-bridge ports. Probe ports (`:18100+`, only when a proxy chain is configured) have no bypass.
+  refuses private targets and container names; the host rules close rebinding (rule 1 outside; egress's static
+  core IP and fixed MAC on internal bridges), intra-bridge ports, and port 18080 everywhere but pd-eapi. Probe ports (`:18100+`, only when a proxy chain is configured) have no bypass.
 - Web's HTTP port is reachable from every harness (same as from the browser: cookie session and Origin checks).
 - With `PROVISIONER_URL` set, the admin's `add-user.sh --admin` source mount is not reproduced by the provisioner.
 

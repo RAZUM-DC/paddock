@@ -18,9 +18,10 @@ What the containers cannot enforce themselves, enforced on the host. Applies to
 | bridge | network | who | route out |
 |---|---|---|---|
 | `pd-out` | `paddock_outside` | edge, egress | yes (the only one) |
-| `pd-core` | `paddock_core` | web, edge (static `PADDOCK_EDGE_IP`, default 172.20.1.250), egress, other core services, legacy harnesses | no (internal) |
+| `pd-core` | `paddock_core` | web, edge (static `PADDOCK_EDGE_IP`, default 172.20.1.250), egress (static `PADDOCK_EGRESS_IP`, default 172.20.1.251), other core services, legacy harnesses | no (internal) |
 | `pd-eapi` | `paddock_egress-api` | web, egress (alias `egress-api`) | no (internal) |
-| `pu<12 hex>` | `paddock-u-u-<12 hex>` | `harness-u-<hex>`, web (alias `web`), egress (alias `egress`) | no (internal) |
+| `pu<12 hex>` | `paddock-u-u-<12 hex>` | `harness-u-<hex>`, web (alias `web`), egress (alias `egress`, fixed MAC `EGRESS_MAC`, default 02:00:00:00:00:e1, set by the provisioner) | no (internal) |
+| — | `paddock_control` | web, provisioner (fixed subnet `PADDOCK_CONTROL_SUBNET`, default 172.20.9.0/24) | no (internal) |
 
 ## 1. Rules: `paddock-guard.nft`
 
@@ -32,8 +33,8 @@ final, and an `accept` in this table does not skip Docker's own chains.
 | # | chain | match (new connections only; replies and established flows pass) | needs br_netfilter |
 |---|---|---|---|
 | 1 | forward | from `pd-out` to 10/8, 172.16/12, 192.168/16, 100.64/10, 169.254/16 (and fc00::/7, fe80::/10) → drop, except `outside_allow4` | no (routed) |
-| 2 | forward | `pu*` → `pu*` (between members of a user bridge): allow tcp 3000 (web), 4500 (harness), 8080 (egress proxy); drop everything else, including tcp 18080 (gost API) | **yes** |
-| 3 | forward | `pd-core` → `pd-core` tcp 18080 (gost API from a legacy harness or anything else on core) → drop | **yes** |
+| 2 | forward | `pu*` → `pu*` (between members of a user bridge): drop anything egress opens (`ether saddr $EGRESS_MAC`); allow tcp 3000 (web), 4500 (harness), 8080 (egress proxy); drop everything else, including tcp 18080 (gost API) | **yes** |
+| 3 | forward | `pd-core` → `pd-core`: drop anything egress opens (`ip saddr $EGRESS_CORE_IP`) and tcp 18080. `pd-out` → `pd-out`: drop tcp 18080. `pd-eapi` → `pd-eapi`: only tcp 18080 (web → gost API) | **yes** |
 | 4 | input | from `pd-*`, `pu*`, `docker0`, `br-*` to the host itself → drop | no |
 
 Install (as root):
@@ -79,15 +80,38 @@ nft add element inet paddock_guard outside_allow4 '{ 10.30.0.2 . 53 }'   # examp
 The gost config in `gost.razum.yaml` resolves through **public** nameservers, so egress normally needs no exception. If
 the proxy chain points at an upstream proxy in a private range, add that `ip . port` here.
 
+**Keep in sync:** `define EGRESS_CORE_IP` at the top of the file = `PADDOCK_EGRESS_IP` (compose), and
+`define EGRESS_MAC` = the provisioner's `EGRESS_MAC`.
+
+Why rules 2 and 3 drop what egress opens: DNS rebinding through the proxy (`<private ip>.nip.io:4500`) passes gost's
+bypass. When the address is on a network egress is attached to, egress connects from that bridge directly. Rule 1
+(pd-out) never sees that connection. In production, this reached a legacy harness on core. Egress has no reason to open
+a connection on any internal bridge: harnesses connect to it, and web reaches the API over pd-eapi. So:
+
+- on core, its static address is refused as a source;
+- on user networks (dynamic subnets) its fixed MAC is refused. A harness cannot copy that MAC because it has no
+  CAP_NET_ADMIN.
+
+The provisioner reconnects an egress attached before `EGRESS_MAC` once, so in-flight proxy connections on that network
+drop.
+
+gost serves its API (top-level `api:`, the only form that works in 3.3.2) on every interface of egress. Port 18080 is
+therefore fenced here and not in gost: refused on pu*, core and outside, and allowed on pd-eapi, where web is the only
+client.
+
 ### Verified in network namespaces
 
 `docs/razum/paddock-guard-test.sh` builds the bridges in throwaway namespaces (`pgt-*`) and loads the real
 `paddock-guard.nft` there. Usage: `sudo ./paddock-guard-test.sh ./paddock-guard.nft`. It needs root, iproute2,
-nft, python3 and Linux ≥ 5.3, and touches no host interface or ruleset. Run here on 6.18 / nft 1.0.9: **18/18 PASS**:
+nft, python3 and Linux ≥ 5.3, and touches no host interface or ruleset. Run here on 6.18 / nft 1.0.9: **25/25 PASS**:
 
 - On a user bridge: harness→web:3000 and web→harness:4500 open; harness→web:3001, web→harness:4501 and →:18080
   dropped.
-- On core: →egress:8080 open, →:18080 dropped.
+- On core: →egress:8080 open, →:18080 dropped; egress (172.20.1.251) → legacy harness:4500 dropped.
+- Egress with `EGRESS_MAC` on a user bridge:
+  - harness→egress:8080 open, →:18080 dropped;
+  - egress→harness:4500 and egress→web:3000 dropped (rebinding).
+- On egress-api: web→egress:18080 open; egress→web:3000 dropped.
 - Bridges → host sshd dropped.
 - outside → VPC dropped; outside → public open; inbound to the outside bridge unaffected.
 - `outside_allow4` opens exactly one `ip . port`.
@@ -152,7 +176,11 @@ Proposal: merge into the existing file. Changing it needs a daemon restart, and 
 ## 4. Switching the compose networks (fixed bridge names, edge static IP)
 
 `driver_opts` and `ipam` of an existing network cannot change, so `paddock_core` and `paddock_outside` must be recreated
-once. `docker compose down` would also remove a legacy harness that is in `COMPOSE_FILE` (`add-user.sh` adds
+once. **Every compose network needs a fixed subnet** (the override sets one for core, outside, control and egress-api),
+especially when the daemon's pool overlaps them (e.g. a 172.20.0.0/14-like pool). Compose creates networks in parallel,
+and one left to the pool can take a subnet another is about to claim. Seen in production: `control` took 172.20.2.0/24,
+which `outside` had just freed, and `outside` then failed with "Pool overlaps". Default subnets: core 172.20.1.0/24,
+outside 172.20.2.0/24, control 172.20.9.0/24, egress-api 10.254.254.0/29. `docker compose down` would also remove a legacy harness that is in `COMPOSE_FILE` (`add-user.sh` adds
 `users/*.yml` there). To keep such a container exactly as it is (same container, same volumes), recreate only the
 other services and move the legacy harness across by hand:
 
@@ -170,6 +198,7 @@ docker network connect --alias $LEG paddock_core $LEG           # repeat --alias
 ip link show pd-core && ip link show pd-out && ip link show pd-eapi
 ```
 
+- Egress gets its static core address (`PADDOCK_EGRESS_IP`) here; reload `paddock-guard.nft` if you change it.
 - The legacy harness is off `core` for the minute in between. Its volumes and container are untouched; it gets a
   dynamic address on the new core (never the edge's static one).
 - A later plain `docker compose up -d` (with `COMPOSE_FILE`) may still decide to recreate it because its network
@@ -201,8 +230,8 @@ shared bucket per path; it logs "Rate limiting could not determine a client IP" 
 |---|---|---|
 | harness → proxy → private literal IP (incl. `::ffff:` forms) | 403 (bypass CIDRs) | rule 1 |
 | harness → proxy → container name (`web`, `harness-*`, …) | 403 (bypass names); also not in public DNS | rule 1 if it ever resolved |
-| harness → proxy → public name resolving to a private IP (`172.20.1.3.nip.io`, rebinding) | **not covered**: gost checks only the requested name, before DNS | **rule 1** |
+| harness → proxy → public name resolving to a private IP (`172.20.1.3.nip.io`, rebinding) | **not covered**: gost checks only the requested name, before DNS | **rule 1** (via outside), **rule 3** (an address on core: egress's static IP), **rule 2** (an address on any user network: egress's MAC), rule 3 (egress-api) |
 | harness → proxy → cloud metadata 169.254.169.254 | 403 (literal) | rule 1 (any name) |
 | harness → another harness / web or egress on other ports | — | rule 2 (user networks); Docker isolates different internal networks |
-| harness → gost API | admission (egress-api subnet only) | rules 2 and 3 |
+| harness → gost API | password only (the top-level `api:` listens everywhere) | rules 2 and 3 (18080 only on pd-eapi) |
 | container → host services | — | rule 4 |

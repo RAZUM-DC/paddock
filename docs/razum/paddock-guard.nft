@@ -6,9 +6,13 @@
 #
 # Bridge names (fixed in docker-compose.provisioner.yml and by the provisioner):
 #   pd-out   outside network (edge, egress): the only bridge with a route to the internet
-#   pd-core  core network (web, edge, egress, bridge, legacy harnesses), internal
+#   pd-core  core network (web, edge at PADDOCK_EDGE_IP, egress at PADDOCK_EGRESS_IP, other services, legacy harnesses)
 #   pd-eapi  egress-api network (web ↔ gost API), internal
-#   pu<hex>  one per SSO user (harness-<id>, web, egress), internal
+#   pu<hex>  one per SSO user (harness-<id>, web, egress with MAC EGRESS_MAC), internal
+
+# Keep in sync with docker-compose.provisioner.yml (PADDOCK_EGRESS_IP) and the provisioner (EGRESS_MAC).
+define EGRESS_CORE_IP = 172.20.1.251
+define EGRESS_MAC = 02:00:00:00:00:e1
 
 table inet paddock_guard
 delete table inet paddock_guard
@@ -46,13 +50,22 @@ table inet paddock_guard {
 		iifname "pd-out" ct state new ip6 daddr @private6 counter drop comment "pd-out to private6"
 
 		# 2. Per-user networks, between members of the same bridge: only web :3000, harness :4500, egress proxy :8080.
+		#    Egress itself never opens anything there (it is attached to every user network with the fixed MAC
+		#    EGRESS_MAC; a harness has no CAP_NET_ADMIN to copy it): this stops DNS rebinding through the proxy
+		#    (<harness ip>.nip.io:4500) from reaching any user's harness or web.
 		#    Bridged traffic: seen here only with br_netfilter and net.bridge.bridge-nf-call-iptables=1.
+		iifname "pu*" oifname "pu*" ct state new ether saddr $EGRESS_MAC counter drop comment "egress into user bridges"
 		iifname "pu*" oifname "pu*" ct state new tcp dport { 3000, 4500, 8080 } accept
 		iifname "pu*" oifname "pu*" ct state new counter drop comment "pu intra-bridge"
 
-		# 3. gost API (egress :18080) only over pd-eapi: harnesses on core (legacy) or on a user network never reach it.
-		#    On pu* bridges rule 2 already drops it; this covers core. Bridged traffic: needs br_netfilter too.
+		# 3. Core and the other internal bridges. The gost API (egress :18080) is served on every interface of egress
+		#    (gost's top-level `api:`), so it is fenced here: reachable only over pd-eapi (web). Egress opens nothing on
+		#    core (the same rebinding, to a legacy harness or a core service). Bridged traffic: needs br_netfilter.
+		iifname "pd-core" oifname "pd-core" ct state new ip saddr $EGRESS_CORE_IP counter drop comment "egress into core"
 		iifname "pd-core" oifname "pd-core" ct state new tcp dport 18080 counter drop comment "core to gost api"
+		iifname "pd-out" oifname "pd-out" ct state new tcp dport 18080 counter drop comment "outside to gost api"
+		iifname "pd-eapi" oifname "pd-eapi" ct state new tcp dport 18080 accept
+		iifname "pd-eapi" oifname "pd-eapi" ct state new counter drop comment "egress-api: only the gost api"
 	}
 
 	chain input {

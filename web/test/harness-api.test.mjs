@@ -185,7 +185,7 @@ function rawChunked(path, token, pieces, finish) {
     const r = request(url + path, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "transfer-encoding": "chunked" } }, (res) => {
       let text = "";
       res.on("data", (d) => (text += d));
-      res.on("end", () => ok({ status: res.statusCode, text }));
+      res.on("end", () => ok({ status: res.statusCode, text, connection: res.headers.connection }));
     });
     r.on("error", fail);
     for (const p of pieces) r.write(p);
@@ -197,9 +197,12 @@ test("bodies: chunked over 16 KB without Content-Length → 413; a body that nev
   withServer({ bodyTimeoutMs: 300 }, async () => {
     const big = await rawChunked("/api/harness/secret-requests", TOK_ALICE, Array.from({ length: 5 }, () => "x".repeat(4096)), true);
     assert.equal(big.status, 413);
+    // The unread rest of the body is not waited for: the connection is closed.
+    assert.equal(big.connection, "close");
     const started = Date.now();
     const slow = await rawChunked("/api/harness/git-credential", TOK_ALICE, ['{"protocol":'], false);
     assert.equal(slow.status, 408);
+    assert.equal(slow.connection, "close");
     assert.ok(Date.now() - started < 5000);
   }));
 

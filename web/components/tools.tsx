@@ -128,7 +128,7 @@ function ToolCard({ tool, request, onChange }: { tool: Tool; request: Request; o
         await installTool(request, tool, settings);
         if (tool.id === "images") await cleanupLegacyImages(request);
       } else await removeTool(request, tool);
-      setSt({ installed: enabled, outdated: false, settings });
+      setSt({ installed: enabled, outdated: false, removed: !enabled, settings });
       setStatus({ ok: true, text: enabled ? t("Done, applies to new turns") : t("Disabled") });
       onChange();
     } catch (e) {
@@ -144,6 +144,7 @@ function ToolCard({ tool, request, onChange }: { tool: Tool; request: Request; o
         <span className="min-w-0 flex-1">
           <span className="font-medium">{localized(tool.name)}</span>
           <span className="ml-2 font-mono text-[11px] text-[var(--faint)]">{tool.skill}</span>
+          {tool.default && <span className="ml-2 text-[11px] text-[var(--faint)]">{t("on by default")}</span>}
           <span className="block text-xs text-[var(--muted)]">{localized(tool.description)}</span>
         </span>
         <span className={`text-xs ${st.installed ? (st.outdated ? "text-[var(--yellow)]" : "text-[var(--green)]") : "text-[var(--faint)]"}`}>

@@ -82,6 +82,7 @@ const ru: Record<string, string> = {
   "copied": "скопировано",
   "copy": "копировать",
   "Drag to resize, double-click to reset": "Потяните, чтобы изменить ширину; двойной клик — сбросить",
+  "on by default": "включён по умолчанию",
 };
 
 export default ru;

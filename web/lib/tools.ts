@@ -10,13 +10,15 @@ export const localized = (v: string | Record<string, string>) => (typeof v === "
 export const HARNESS_HOME = "/home/codex/.codex";
 
 // name и description — строка или { en, ru }: плагины пишут на своём языке, морда показывает язык интерфейса.
-export type Tool = { id: string; name: string | Record<string, string>; description: string | Record<string, string>; bin: string; skill: string; needs?: string; script: string; skillText: string };
+// default: installed on connect unless the user has removed it before (a marker file in the tool's folder remembers that).
+export type Tool = { id: string; name: string | Record<string, string>; description: string | Record<string, string>; bin: string; skill: string; needs?: string; default?: boolean; script: string; skillText: string };
 export type Skill = { name: string; description: string; path: string; scope: string; enabled: boolean };
-export type ToolState = { installed: boolean; outdated: boolean; settings: Record<string, unknown> };
+export type ToolState = { installed: boolean; outdated: boolean; removed: boolean; settings: Record<string, unknown> };
 
 export const toolDir = (t: { id: string }) => `${HARNESS_HOME}/paddock/tools/${t.id}`;
 export const toolBin = (t: { id: string; bin: string }) => `${toolDir(t)}/${t.bin}`;
 const skillDir = (t: { skill: string }) => `${HARNESS_HOME}/skills/${t.skill}`;
+const removedMarker = (t: { id: string }) => `${toolDir(t)}/removed`;
 
 export const b64 = (text: string) => {
   const bytes = new TextEncoder().encode(text);
@@ -39,16 +41,17 @@ const readText = (request: Request, path: string) => request("fs/readFile", { pa
 
 // Установлен = есть скилл и команда; устарел = команда или скилл в харнессе не совпадают с реестром (морду обновили).
 export async function toolState(request: Request, t: Tool): Promise<ToolState> {
-  const [skill, script, settings] = await Promise.all([
+  const [skill, script, settings, removed] = await Promise.all([
     readText(request, `${skillDir(t)}/SKILL.md`),
     readText(request, toolBin(t)),
     readText(request, `${toolDir(t)}/settings.json`),
+    readText(request, removedMarker(t)),
   ]);
   let parsed = {};
   try {
     parsed = JSON.parse(settings ?? "{}");
   } catch {}
-  return { installed: skill != null && script != null, outdated: (script != null && script !== t.script) || (skill != null && skill !== t.skillText.replaceAll("{{BIN}}", toolBin(t))), settings: parsed };
+  return { installed: skill != null && script != null, removed: removed != null, outdated: (script != null && script !== t.script) || (skill != null && skill !== t.skillText.replaceAll("{{BIN}}", toolBin(t))), settings: parsed };
 }
 
 export async function installTool(request: Request, t: Tool, settings: Record<string, unknown>) {
@@ -57,20 +60,26 @@ export async function installTool(request: Request, t: Tool, settings: Record<st
   await request("fs/writeFile", { path: toolBin(t), dataBase64: b64(t.script) });
   await request("fs/writeFile", { path: `${toolDir(t)}/settings.json`, dataBase64: b64(JSON.stringify(settings)) });
   await request("fs/writeFile", { path: `${skillDir(t)}/SKILL.md`, dataBase64: b64(t.skillText.replaceAll("{{BIN}}", toolBin(t))) });
+  await request("fs/remove", { path: removedMarker(t), force: true }).catch(() => {});
   await request("skills/list", { forceReload: true }).catch(() => {});
 }
 
 // Installed tools follow the registry: after a Paddock update the harness gets the new command and skill on the
-// next connect, with the user's settings kept. Tools the user has not installed are left alone.
+// next connect, with the user's settings kept. Tools the user has not installed are left alone, except "default"
+// tools, which are installed unless the user removed them before.
 export async function refreshTools(request: Request) {
   for (const t of await loadRegistry()) {
     const st = await toolState(request, t);
     if (st.installed && st.outdated) await installTool(request, t, st.settings);
+    else if (!st.installed && t.default === true && !st.removed) await installTool(request, t, st.settings);
   }
 }
 
 // Удаляем только скилл: без него агент про команду не знает, а настройки сохранятся до следующего включения.
+// The marker keeps a "default" tool from coming back on the next connect.
 export async function removeTool(request: Request, t: Tool) {
+  await request("fs/createDirectory", { path: toolDir(t), recursive: true }).catch(() => {});
+  await request("fs/writeFile", { path: removedMarker(t), dataBase64: b64(`removed by the user ${new Date().toISOString()}\n`) }).catch(() => {});
   await request("fs/remove", { path: skillDir(t), recursive: true, force: true }).catch(() => {});
   await request("skills/list", { forceReload: true }).catch(() => {});
 }

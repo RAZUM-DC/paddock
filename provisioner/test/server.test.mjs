@@ -69,6 +69,16 @@ function fakeDocker(sock, tokensDir) {
   return new Promise((r) => srv.listen(sock, () => r({ srv, state })));
 }
 
+// Ask the OS for a free port (listen on 0, read it, close).
+const freePort = () => new Promise((resolve, reject) => {
+  const s = createServer();
+  s.on("error", reject);
+  s.listen(0, "127.0.0.1", () => {
+    const { port } = s.address();
+    s.close(() => resolve(port));
+  });
+});
+
 async function start(extraEnv = {}) {
   const dir = mkdtempSync(join(tmpdir(), "prov-"));
   const sock = join(dir, "docker.sock");
@@ -77,15 +87,25 @@ async function start(extraEnv = {}) {
   const userEnv = join(dir, "user-env");
   mkdirSync(userEnv);
   writeFileSync(join(userEnv, "alice.env"), "LLM_API_KEY=sk-test-1\nHTTPS_PROXY=http://evil:1\n");
-  const port = 20000 + Math.floor(Math.random() * 20000);
-  const child = spawn(process.execPath, [new URL("../server.mjs", import.meta.url).pathname], {
-    env: { PATH: process.env.PATH, PORT: String(port), PROVISIONER_TOKEN: "x".repeat(40), DOCKER_SOCKET: sock, TOKENS_DIR: tokens, USER_ENV_DIR: userEnv, RECONCILE_INTERVAL_MS: "0", ...extraEnv },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-  let out = "";
-  child.stdout.on("data", (d) => (out += d));
-  child.stderr.on("data", (d) => (out += d));
-  for (let i = 0; i < 50 && !out.includes("paddock provisioner on"); i++) await new Promise((r) => setTimeout(r, 50));
+  // A port the OS reports free, and a retry if another process takes it before the provisioner binds it; the
+  // provisioner's own start is waited for up to 10 s (a loaded CI machine is slow to spawn node).
+  let port, child, out = "";
+  for (let attempt = 0; attempt < 5; attempt++) {
+    port = await freePort();
+    out = "";
+    child = spawn(process.execPath, [new URL("../server.mjs", import.meta.url).pathname], {
+      env: { PATH: process.env.PATH, PORT: String(port), PROVISIONER_TOKEN: "x".repeat(40), DOCKER_SOCKET: sock, TOKENS_DIR: tokens, USER_ENV_DIR: userEnv, RECONCILE_INTERVAL_MS: "0", ...extraEnv },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (out += d));
+    let exited = false;
+    child.on("exit", () => (exited = true));
+    for (let i = 0; i < 200 && !exited && !out.includes("paddock provisioner on"); i++) await new Promise((r) => setTimeout(r, 50));
+    if (out.includes("paddock provisioner on") && !exited) break;
+    child.kill();
+    if (!/EADDRINUSE/.test(out) && !exited) throw new Error(`provisioner did not start:\n${out}`);
+  }
   const call = (method, path, body, auth = `Bearer ${"x".repeat(40)}`) =>
     fetch(`http://127.0.0.1:${port}${path}`, { method, headers: { authorization: auth, "content-type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) })
       .then(async (r) => ({ status: r.status, body: await r.json() }));
@@ -94,7 +114,7 @@ async function start(extraEnv = {}) {
 }
 
 const waitReady = async (call, id) => {
-  for (let i = 0; i < 50; i++) {
+  for (let i = 0; i < 200; i++) {
     const r = await call("GET", `/harness/${id}`);
     if (r.body.ready) return r;
     await new Promise((r) => setTimeout(r, 50));

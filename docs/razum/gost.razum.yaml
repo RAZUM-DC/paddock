@@ -1,0 +1,142 @@
+# secrets/egress/gost.yaml for docker-compose.yml + docker-compose.provisioner.yml (gost v3, image gogost/gost:3.3.2).
+# Generic: replace the two nameserver placeholders and the API password; nothing else is site-specific.
+#
+# Checked against the gost v3.3.2 source (go-gost/x v0.27.2, go-gost/core v0.6.1); NOT run against a gost binary
+# here (no Docker daemon, building gost was not permitted). Smoke test after deploying, from the web container:
+#   curl -sx http://egress:8080 -o /dev/null -w '%{http_code}\n' https://example.com                  # 200
+#   curl -sx http://egress:8080 -o /dev/null -w '%{http_code}\n' http://10.0.0.1/                     # 403 (bypass)
+#   curl -sx http://egress:8080 -o /dev/null -w '%{http_code}\n' http://[::ffff:172.20.1.1]/          # 403 (bypass)
+#   curl -sx http://egress:8080 -o /dev/null -w '%{http_code}\n' http://localhost./                   # 403 (bypass)
+#   curl -sx http://egress:8080 -o /dev/null -w '%{http_code}\n' http://harness-u-000000000000:4500/  # 403 (bypass)
+#   curl -s -u "$GOST_API_USER:$GOST_API_PASS" http://egress-api:18080/api/config >/dev/null && echo api-ok
+# and from a harness: `curl -m5 http://egress:18080/api/config` must fail (connection closed by admission, before auth).
+#
+# WHAT THIS FILE COVERS (source references are go-gost/x v0.27.2)
+# - The http handler checks the bypass against the target AS REQUESTED (CONNECT host:port or the Host of a plain
+#   request), before any DNS lookup (handler/http/handler.go: Bypass.Contains → 403 Forbidden). A handler-level bypass
+#   is a deny list ("blacklist" mode, the default). This is NOT the hop/chain `bypass`, which means "go direct".
+# - Pattern kinds (bypass/bypass.go classifyPatterns, internal/matcher/matcher.go):
+#     CIDR "a.b.c.d/n", "x::/n"  matches only when the requested host is an IP literal; the address is unmapped first,
+#                                so [::ffff:10.0.0.1] and [::ffff:a00:1] hit 10.0.0.0/8.
+#     single IP "::1"            parsed as a one-address IP range (netip), so other spellings of the same IPv6 hit too.
+#     plain name "web"           exact, case-insensitive host match. ".example" (leading dot) = the name and all
+#                                subdomains. A trailing dot is NOT stripped: "web." does not match "web".
+#     wildcard "harness-*"       gobwas/glob on the lower-cased host, no separators, so "*" also spans dots:
+#                                "*.internal" = anything ending in ".internal", "*." = any name with a trailing dot.
+#   Patterns may carry ":port" or ":lo-hi"; none here do, so every port is refused.
+# - `resolver: public` on the service: the router resolves every name through these nameservers only
+#   (internal/net/resolve.go ResolveAll; resolver/resolver.go). There is no fallback to Docker's embedded DNS
+#   (127.0.0.11) unless the resolver name does not exist in `resolvers:` (then gost silently uses the system resolver,
+#   which knows every container name). So container names (web, edge, harness-u-…) do not resolve through the proxy
+#   even without the name entries below; those are a second layer.
+# - Non-canonical IPv4 spellings ("2130706433", "0x7f.1", "0177.0.0.1") are not IP literals for Go, so they are
+#   treated as names and sent to the public resolver (expected NXDOMAIN → error, not a connection).
+#
+# WHAT IT DOES NOT COVER
+# - DNS rebinding / public names that resolve to private addresses (e.g. 172.20.1.3.nip.io, or any attacker-owned
+#   name with an A record of 10.x / 169.254.169.254): gost resolves AFTER the bypass check and never re-checks the
+#   resolved IP (chain/router.go dial: xnet.Resolve then dial; route.go: same). gost v3.3.2 cannot filter on resolved
+#   addresses for a direct (chainless) service. This MUST be covered on the host: nft drops new connections from the
+#   pd-out bridge to private ranges (docs/razum/g017-host-firewall.md, rule 1 in paddock-guard.nft).
+# - Probe ports (:18100+, created by web only when a proxy chain is configured) have no bypass.
+# - The proxy port is shared by every user network (egress sits on all of them). The bypass refuses harness targets
+#   by name and private literals; the host firewall refuses the rest.
+
+services:
+  - name: proxy
+    addr: ":8080"
+    # Who may use the proxy: only Docker-private client addresses (defence in depth if the port is ever published).
+    admission: clients-private-only
+    # Where requests may go: refused with 403 when they match.
+    bypass: no-internal-targets
+    # Names resolve through public nameservers only (see above). The resolver must exist under `resolvers:`.
+    resolver: public
+    handler:
+      type: http
+      # No `chain:` → direct. With upstream proxies: add `chain: upstream` and a `chains:` section (Settings → Proxies
+      # edits that chain); the bypass and resolver above still apply to the requested target.
+    listener:
+      type: tcp
+
+  # The gost web API as a service (instead of a top-level `api:` block, which would listen on every network egress is
+  # attached to, i.e. on every user network). Admission runs on accept, before any HTTP or auth: only the egress-api
+  # network (PADDOCK_EGRESS_API_SUBNET in docker-compose.provisioner.yml) gets in; web is the only other member and
+  # reaches it as http://egress-api:18080/api. Keep both subnets in sync if you change one.
+  - name: api
+    addr: ":18080"
+    admission: egress-api-only
+    handler:
+      type: api
+      auth:
+        username: hub
+        password: CHANGE_ME_TO_A_LONG_RANDOM_PASSWORD   # = GOST_API_PASS in secrets/web.env; GOST_API_USER=hub
+      metadata:
+        pathPrefix: /api
+        accessLog: false
+    listener:
+      type: tcp
+
+admissions:
+  - name: clients-private-only
+    whitelist: true
+    matchers:
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 127.0.0.0/8
+  - name: egress-api-only
+    whitelist: true
+    matchers:
+      - 10.254.254.0/29
+
+resolvers:
+  - name: public
+    nameservers:
+      # REPLACE with public recursive resolvers reachable from the outside network. Not the VPC/cloud resolver if it
+      # sits in a private range: the host firewall drops pd-out → private, and a private resolver would answer for
+      # internal names. Left as is (TEST-NET addresses), nothing resolves: fail closed.
+      - addr: udp://192.0.2.53:53
+        timeout: 5s
+      - addr: tcp://198.51.100.53:53
+        timeout: 5s
+
+bypasses:
+  - name: no-internal-targets
+    # Blacklist mode (the default): a target that matches is refused with 403.
+    matchers:
+      # IPv4: private, CGNAT, link-local (cloud metadata), loopback, "this network", IETF/benchmark, multicast/reserved.
+      - 10.0.0.0/8
+      - 172.16.0.0/12
+      - 192.168.0.0/16
+      - 100.64.0.0/10
+      - 169.254.0.0/16
+      - 127.0.0.0/8
+      - 0.0.0.0/8
+      - 192.0.0.0/24
+      - 198.18.0.0/15
+      - 224.0.0.0/3
+      # IPv6: unspecified, loopback (also as a one-address range), ULA, link-local, NAT64 well-known prefix.
+      - ::/128
+      - ::1/128
+      - "::1"
+      - fc00::/7
+      - fe80::/10
+      - 64:ff9b::/96
+      # Names, matched before DNS. Trailing-dot forms are not normalised by gost, so refuse every FQDN with a dot.
+      - "*."
+      - localhost
+      - "*.localhost"
+      - "*.local"
+      - "*.internal"
+      # Compose service names, aliases and container names on the networks egress shares.
+      - egress-api
+      - bridge
+      - web
+      - edge
+      - egress
+      - provisioner
+      - "harness-*"
+      - "paddock-*"
+
+log:
+  level: info

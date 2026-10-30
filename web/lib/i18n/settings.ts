@@ -148,7 +148,8 @@ const ru: Record<string, string> = {
   "A prefix limits the account to repositories under it (my-org/ → github.com/my-org/*); without one it covers every repository on the host. The most specific prefix wins. The token is shown only as its last 4 characters.": "Префикс ограничивает аккаунт репозиториями под ним (my-org/ → github.com/my-org/*); без префикса аккаунт действует на все репозитории хоста. Побеждает самый точный префикс. Токен показывается только последними 4 символами.",
   "Add": "Добавить",
   // Second factor after single sign-on (/2fa)
-  "Too many attempts. Try again in 15 minutes.": "Слишком много попыток. Попробуйте через 15 минут.",
+  "Too many attempts. Try again later.": "Слишком много попыток. Попробуйте позже.",
+  "Your second factor is locked after too many wrong codes. Ask an administrator to unlock it.": "Второй фактор заблокирован после слишком многих неверных кодов. Попросите администратора разблокировать.",
   "Too many wrong codes. Sign in again.": "Слишком много неверных кодов. Войдите заново.",
   "Already verified.": "Уже подтверждено.",
   "Something went wrong ({code})": "Что-то пошло не так ({code})",

@@ -3,17 +3,20 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import Database from "better-sqlite3";
 import { base32 } from "@better-auth/utils/base32";
+import { readFileSync } from "node:fs";
 import { createOTP } from "@better-auth/utils/otp";
 import {
-  allowedWhilePending, base32Decode, base32Encode, classifyNewSession, cleanupSecondFactor, hotp, isPending, lastTotpStep, lockedUntil, LOCK_MS, matchBackupCode,
-  matchTotp, MAX_SESSION_FAILURES, MAX_USER_FAILURES, newBackupCodes, newTotpSecret, PERIOD, recordFailure, resetFailures, safeNext, saveTotpStep,
-  secondFactorRequired, sessionState, setSessionState, setupSecondFactorTables, totpKey, totpUri, FAILURE_WINDOW_MS,
+  allowedWhilePending, base32Decode, base32Encode, beginAttempt, classifyNewSession, cleanupSecondFactor, consumeSuccess, countAttempt, hotp, isPending, lastTotpStep, lockedUntil,
+  LOCK_MS, LOCK_MEMORY_MS, lockDuration, matchBackupCode, matchTotp, MAX_LOCK_MS, MAX_SESSION_FAILURES, MAX_USER_FAILURES, HARD_LOCK_AFTER, HARD_LOCKED, newBackupCodes, newTotpSecret,
+  PERIOD, resetFailures, revokeSession, safeNext, saveTotpStep, secondFactorPageAction, secondFactorRequired, sessionState, setSessionState, setupSecondFactorTables, storeEnrolment,
+  totpKey, totpUri, FAILURE_WINDOW_MS,
 } from "../lib/second-factor-core.ts";
 
 function db() {
   const d = new Database(":memory:");
   d.exec(`CREATE TABLE "account" ("id" text primary key, "accountId" text, "providerId" text, "userId" text);
-    CREATE TABLE "session" ("id" text primary key, "expiresAt" date not null, "token" text, "userId" text)`);
+    CREATE TABLE "session" ("id" text primary key, "expiresAt" date not null, "token" text, "userId" text);
+    CREATE TABLE "twoFactor" ("id" text not null primary key, "secret" text not null, "backupCodes" text not null, "userId" text not null, "verified" integer, "failedVerificationCount" integer, "lockedUntil" date)`);
   setupSecondFactorTables(d);
   return d;
 }
@@ -66,27 +69,156 @@ test("cleanup drops rows of missing or expired sessions and old failure counters
   const now = Date.parse("2026-10-30T12:00:00Z");
   d.prepare(`INSERT INTO "session" VALUES ('live', ?, 't1', 'u'), ('old', ?, 't2', 'u')`).run(new Date(now + 3600e3).toISOString(), new Date(now - 1000).toISOString());
   for (const s of ["live", "old", "gone"]) setSessionState(d, s, "u", "verified");
-  recordFailure(d, "u:old", 10, now - FAILURE_WINDOW_MS - 1);
-  recordFailure(d, "u:new", 10, now);
+  countAttempt(d, "u:old", 10, now - FAILURE_WINDOW_MS - 1);
+  countAttempt(d, "u:new", 10, now);
+  // Lock history is kept for a week so locks keep growing.
+  d.prepare("INSERT INTO second_factor_failures VALUES ('u:history', 1, ?, ?, 2)").run(now - 2 * FAILURE_WINDOW_MS, now - 1000);
+  d.prepare("INSERT INTO second_factor_failures VALUES ('u:ancient', 1, ?, ?, 2)").run(now - LOCK_MEMORY_MS - 2 * FAILURE_WINDOW_MS, now - LOCK_MEMORY_MS - 1);
   cleanupSecondFactor(d, now);
   assert.deepEqual(d.prepare("SELECT session_id FROM session_second_factor").all().map((r) => r.session_id), ["live"]);
-  assert.deepEqual(d.prepare("SELECT key FROM second_factor_failures").all().map((r) => r.key), ["u:new"]);
+  assert.deepEqual(d.prepare("SELECT key FROM second_factor_failures ORDER BY key").all().map((r) => r.key), ["u:history", "u:new"]);
 });
 
-test("failures: count within the window, lock at the maximum, reset", () => {
+test("countAttempt: count within the window, lock at the maximum, growing locks, hard lock, reset", () => {
   const d = db();
   assert.equal(MAX_SESSION_FAILURES, 5);
   assert.equal(MAX_USER_FAILURES, 10);
   let t = 1_000_000;
-  for (let i = 1; i < 3; i++) assert.equal(recordFailure(d, "k", 3, t), i);
+  assert.deepEqual(countAttempt(d, "k", 3, t), { count: 1, lockedUntil: 0, locks: 0, newLock: false });
+  assert.equal(countAttempt(d, "k", 3, t).count, 2);
   assert.equal(lockedUntil(d, "k", t), 0);
-  assert.equal(recordFailure(d, "k", 3, t), 3);
+  assert.deepEqual(countAttempt(d, "k", 3, t), { count: 3, lockedUntil: t + LOCK_MS, locks: 1, newLock: true });
   assert.equal(lockedUntil(d, "k", t), t + LOCK_MS);
   assert.equal(lockedUntil(d, "k", t + LOCK_MS), 0);
-  assert.equal(recordFailure(d, "k", 3, t + FAILURE_WINDOW_MS), 1, "a new window starts over");
+  // The next window starts over, but the second lock lasts twice as long, the third four times…
+  const durations = [LOCK_MS];
+  for (let lock = 2; lock <= HARD_LOCK_AFTER; lock++) {
+    t += FAILURE_WINDOW_MS + MAX_LOCK_MS;
+    assert.equal(countAttempt(d, "k", 3, t).count, 1, "a new window starts over");
+    countAttempt(d, "k", 3, t);
+    const c = countAttempt(d, "k", 3, t);
+    assert.equal(c.locks, lock);
+    durations.push(c.lockedUntil === HARD_LOCKED ? "hard" : c.lockedUntil - t);
+  }
+  assert.deepEqual(durations, [LOCK_MS, 2 * LOCK_MS, 4 * LOCK_MS, 8 * LOCK_MS, "hard"]);
+  assert.equal(HARD_LOCK_AFTER, 5);
+  assert.equal(lockedUntil(d, "k", t + 365 * 24 * 3600_000), HARD_LOCKED, "a hard lock does not expire");
+  assert.equal(lockDuration(0), LOCK_MS);
+  assert.equal(lockDuration(20), MAX_LOCK_MS);
   resetFailures(d, "k");
   assert.equal(lockedUntil(d, "k", t), 0);
-  assert.equal(recordFailure(d, "k", 3, t), 1);
+  assert.equal(countAttempt(d, "k", 3, t).locks, 0);
+});
+
+test("beginAttempt: user lock first, then at most MAX_SESSION_FAILURES attempts per session, both counted up front", () => {
+  const d = db();
+  const now = 5_000_000;
+  for (let i = 1; i <= 5; i++) {
+    const a = beginAttempt(d, "u:1", "s:1", now);
+    assert.equal(a.ok, true);
+    assert.equal(a.session.count, i);
+    assert.equal(a.user.count, i);
+  }
+  assert.deepEqual(beginAttempt(d, "u:1", "s:1", now), { ok: false, reason: "revoked" });
+  assert.equal(d.prepare("SELECT failures FROM second_factor_failures WHERE key = 'u:1'").get().failures, 5, "refused attempts do not count for the user");
+  for (let i = 1; i <= 5; i++) assert.equal(beginAttempt(d, "u:1", "s:2", now).ok, true);
+  const locked = beginAttempt(d, "u:1", "s:3", now);
+  assert.equal(locked.ok, false);
+  assert.equal(locked.reason, "locked");
+  assert.equal(locked.until, now + LOCK_MS);
+  assert.equal(d.prepare("SELECT failures FROM second_factor_failures WHERE key = 's:3'").get(), undefined, "a locked user's attempt counts nowhere");
+});
+
+function liveSession(d, id, userId, now) {
+  d.prepare(`INSERT INTO "session" VALUES (?, ?, ?, ?)`).run(id, new Date(now + 3600e3).toISOString(), "tok-" + id, userId);
+  setSessionState(d, id, userId, "pending");
+}
+
+test("consumeSuccess: one winner, nothing half-done", () => {
+  const d = db();
+  const now = 7_000_000_000;
+  const base = (id) => ({ sessionId: id, userId: "u", userKey: "u:u", sessionKey: `s:${id}`, step: null, backup: null, confirm: null });
+  liveSession(d, "a", "u", now);
+  countAttempt(d, "u:u", 10, now);
+  countAttempt(d, "s:a", 5, now);
+  assert.equal(consumeSuccess(d, { ...base("a"), step: 100 }, "oidc", now), "ok");
+  assert.equal(d.prepare(`SELECT 1 FROM "session" WHERE "id" = 'a'`).get(), undefined, "the pending session is deleted");
+  assert.equal(d.prepare("SELECT 1 FROM session_second_factor WHERE session_id = 'a'").get(), undefined);
+  assert.equal(d.prepare("SELECT COUNT(*) n FROM second_factor_failures").get().n, 0, "counters reset");
+  assert.equal(lastTotpStep(d, "u"), 100);
+  // The same step (or an older one) again: replay, and the session stays as it was.
+  liveSession(d, "b", "u", now);
+  assert.equal(consumeSuccess(d, { ...base("b"), step: 100 }, "oidc", now), "replay");
+  assert.equal(consumeSuccess(d, { ...base("b"), step: 99 }, "oidc", now), "replay");
+  assert.ok(d.prepare(`SELECT 1 FROM "session" WHERE "id" = 'b'`).get());
+  // A revoked / missing / expired session cannot be upgraded.
+  assert.equal(consumeSuccess(d, { ...base("missing"), step: 200 }, "oidc", now), "gone");
+  d.prepare(`INSERT INTO "session" VALUES ('old', ?, 't', 'u')`).run(new Date(now - 1).toISOString());
+  setSessionState(d, "old", "u", "pending");
+  assert.equal(consumeSuccess(d, { ...base("old"), step: 201 }, "oidc", now), "gone");
+  assert.equal(lastTotpStep(d, "u"), 100, "nothing was written by the failed attempts");
+  // Not pending (already verified): refused.
+  setSessionState(d, "b", "u", "verified");
+  assert.equal(consumeSuccess(d, { ...base("b"), step: 300 }, "oidc", now), "not-pending");
+  setSessionState(d, "b", "u", "pending");
+  // Backup codes: compare-and-swap on the stored list; a step is rolled back when the backup part fails.
+  d.prepare(`INSERT INTO "twoFactor" VALUES ('tf', 'enc-secret', 'list-v1', 'u', 1, 0, NULL)`).run();
+  assert.equal(consumeSuccess(d, { ...base("b"), backup: { rowId: "tf", before: "list-v0", after: "list-v2" } }, "oidc", now), "replay");
+  assert.equal(consumeSuccess(d, { ...base("b"), step: 400, backup: { rowId: "tf", before: "stale", after: "x" } }, "oidc", now), "replay");
+  assert.equal(lastTotpStep(d, "u"), 100, "rolled back");
+  assert.equal(consumeSuccess(d, { ...base("b"), backup: { rowId: "tf", before: "list-v1", after: "list-v2" } }, "oidc", now), "ok");
+  assert.equal(d.prepare(`SELECT "backupCodes" b FROM "twoFactor"`).get().b, "list-v2");
+  // First enrolment: only the unconfirmed row with the secret that was checked.
+  d.prepare(`INSERT INTO "twoFactor" VALUES ('tf2', 'enc-new', 'codes', 'v', 0, 0, NULL)`).run();
+  liveSession(d, "c", "v", now);
+  const cv = { ...base("c"), userId: "v", userKey: "u:v", step: 500 };
+  assert.equal(consumeSuccess(d, { ...cv, confirm: { rowId: "tf2", secret: "enc-other" } }, "oidc", now), "changed");
+  assert.equal(lastTotpStep(d, "v"), -1);
+  assert.equal(consumeSuccess(d, { ...cv, confirm: { rowId: "tf2", secret: "enc-new" } }, "oidc", now), "ok");
+  assert.equal(d.prepare(`SELECT "verified" v FROM "twoFactor" WHERE "id" = 'tf2'`).get().v, 1);
+});
+
+test("revokeSession removes the session row and its state at once", () => {
+  const d = db();
+  liveSession(d, "r", "u", Date.now());
+  revokeSession(d, "r");
+  assert.equal(d.prepare(`SELECT 1 FROM "session" WHERE "id" = 'r'`).get(), undefined);
+  assert.equal(d.prepare("SELECT 1 FROM session_second_factor WHERE session_id = 'r'").get(), undefined);
+});
+
+test("storeEnrolment: one row per user, replaces only an unconfirmed one, never touches a confirmed or legacy (NULL) one", () => {
+  const d = db();
+  assert.equal(storeEnrolment(d, "u", "s1", "b1", "id1"), "stored");
+  assert.equal(storeEnrolment(d, "u", "s2", "b2", "id2"), "stored");
+  assert.deepEqual(d.prepare(`SELECT "id", "secret", "backupCodes", "verified" FROM "twoFactor" WHERE "userId" = 'u'`).all(), [{ id: "id1", secret: "s2", backupCodes: "b2", verified: 0 }]);
+  d.prepare(`UPDATE "twoFactor" SET "verified" = 1`).run();
+  assert.equal(storeEnrolment(d, "u", "s3", "b3", "id3"), "enrolled");
+  d.prepare(`UPDATE "twoFactor" SET "verified" = NULL`).run();
+  assert.equal(storeEnrolment(d, "u", "s3", "b3", "id3"), "enrolled", "better-auth treats verified NULL as set up");
+  assert.equal(d.prepare(`SELECT "secret" s FROM "twoFactor"`).get().s, "s2");
+});
+
+test("secondFactorPageAction: login, the sanitised target, or the form", () => {
+  assert.deepEqual(secondFactorPageAction(null, "/x"), { redirect: "/login" });
+  assert.deepEqual(secondFactorPageAction({ signedIn: false, pending: false }, "/x"), { redirect: "/login" });
+  assert.deepEqual(secondFactorPageAction({ signedIn: true, pending: false }, "/?chat=1"), { redirect: "/?chat=1" });
+  for (const bad of ["//evil.example", "https://evil.example", "/\\evil.example", "/\u0007x", "/a\nb"]) {
+    assert.deepEqual(secondFactorPageAction({ signedIn: true, pending: false }, bad), { redirect: "/" }, bad);
+    assert.deepEqual(secondFactorPageAction({ signedIn: true, pending: true }, bad), { render: true, next: "/" }, bad);
+  }
+  assert.deepEqual(secondFactorPageAction({ signedIn: true, pending: true }, "/?chat=1"), { render: true, next: "/?chat=1" });
+  // The page uses exactly this.
+  const page = readFileSync(new URL("../app/2fa/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /const action = secondFactorPageAction\(st, \(await searchParams\)\.next\);/);
+  assert.match(page, /if \("redirect" in action\) redirect\(action\.redirect\);/);
+  assert.match(page, /next=\{action\.next\}/);
+});
+
+test("secrets and backup codes come from node:crypto, not Math.random", () => {
+  const src = readFileSync(new URL("../lib/second-factor-core.ts", import.meta.url), "utf8");
+  assert.match(src, /import \{[^}]*\brandomInt\b[^}]*\} from "node:crypto";/);
+  assert.match(src, /ALNUM\[randomInt\(ALNUM\.length\)\]/);
+  assert.doesNotMatch(src.replace(/\/\/.*$/gm, ""), /Math\.random/);
 });
 
 test("hotp: RFC 4226 / RFC 6238 test vectors and better-auth's implementation", async () => {

@@ -79,22 +79,57 @@ test("an OIDC session is pending: no get-session, no WS bridge, no API route, no
   // The session check of pages and of the WS bridge (server.ts).
   assert.equal(await A.sessionFromHeaders(h), null);
   await assert.rejects(A.auth.api.getSession({ headers: h }));
-  // better-auth HTTP endpoints that would read or change the account.
-  for (const [path, method, body] of [["/get-session", "GET"], ["/list-sessions", "GET"], ["/two-factor/disable", "POST", { password: "x" }], ["/two-factor/enable", "POST", { password: "x" }],
-    ["/change-password", "POST", { currentPassword: "a", newPassword: "b".repeat(12) }], ["/update-user", "POST", { name: "x" }], ["/revoke-sessions", "POST", {}], ["/list-accounts", "GET"],
-    ["/two-factor/verify-totp", "POST", { code: "123456" }], ["/link-social", "POST", { provider: "oidc" }], ["/delete-user", "POST", {}]]) {
-    const r = await authFetch(path, { jar, method, body });
-    assert.equal(r.status, 403, `${path}: ${r.status} ${JSON.stringify(r.json)}`);
+  // EVERY better-auth endpoint: 403 SECOND_FACTOR_REQUIRED, except the explicit allow-list.
+  const allowed = new Set(["/sign-out", "/second-factor/status", "/second-factor/enrol", "/second-factor/verify", "/sign-in/social", "/sign-in/email", "/callback/:id", "/error", "/ok"]);
+  const refused = [];
+  // A body and query that pass every endpoint's input validation, so the request reaches the hooks.
+  const SINK = { name: "x", email: "x@corp.example", password: "p".repeat(12), newPassword: "n".repeat(12), currentPassword: "c".repeat(12), newEmail: "n@corp.example",
+    token: "t", code: "123456", provider: "oidc", providerId: "oidc", accountId: "a", callbackURL: "/", secret: "s", userId: "u" };
+  for (const [key, ep] of Object.entries(A.auth.api)) {
+    const method = [ep.options?.method].flat()[0] ?? "POST";
+    if (!ep.path) {
+      // Server-only endpoints (no route): auth.api calls go through the same gate.
+      await assert.rejects(ep({ headers: h, body: SINK }), (e) => e.statusCode === 403 || e.status === "FORBIDDEN", key);
+      refused.push(key);
+      continue;
+    }
+    // The allow-list is exercised by the other tests (calling sign-out here would end this session).
+    if (allowed.has(ep.path)) continue;
+    // Responses must not change the cookies this walk sends.
+    const r = await authFetch(ep.path.replace(/:[a-zA-Z]+/g, "x") + (method === "GET" ? "?token=t&callbackURL=%2F" : ""), { jar: { header: jar.header, take() {} }, method, body: method === "GET" ? undefined : SINK });
+    {
+      assert.equal(r.status, 403, `${ep.path}: ${r.status} ${JSON.stringify(r.json)}`);
+      assert.equal(r.json?.code, "SECOND_FACTOR_REQUIRED", ep.path);
+      refused.push(ep.path);
+    }
   }
-  // Paddock's API routes (requireUser, requireAdmin, the plain session checks).
-  const req = (method = "GET", body) => new Request(`${PUBLIC}/api/x`, { method, headers: { cookie: jar.header(), origin: PUBLIC, "content-type": "application/json" }, body });
-  for (const [name, fn] of [["git GET", () => routes.gitAccounts.GET(req())], ["git POST", () => routes.gitAccounts.POST(req("POST", JSON.stringify({ host: "github.com", token: "t".repeat(20) })))],
-    ["secret-requests", () => routes.secretRequests.GET(req())], ["admin git", () => routes.adminGit.GET(new Request(`${PUBLIC}/api/admin/git-accounts?user=x`, { headers: { cookie: jar.header() } }))],
-    ["harness", () => routes.harness.GET(req())], ["tools", () => routes.tools.GET(req())], ["turns", () => routes.turns.GET(new Request(`${PUBLIC}/api/turns?ids=a`, { headers: { cookie: jar.header() } }))],
-    ["snapshots", () => routes.snapshots.GET(req())], ["proxy", () => routes.proxy.GET(req())], ["net", () => routes.net.GET(req())]]) {
-    const r = await fn();
-    assert.equal(r.status, 401, `${name}: ${r.status}`);
+  assert.ok(await authFetch("/second-factor/status", { jar }).then((r) => r.json.pending), "still the same pending session after the walk");
+  for (const p of ["/get-session", "/get-access-token", "/update-session", "/account-info", "/unlink-account", "/list-sessions", "/two-factor/disable", "/two-factor/verify-totp", "/change-password", "/link-social"])
+    assert.ok(refused.includes(p), p);
+  // EVERY Paddock API route (app/api/**/route.ts), every exported method: no access (401/403) for a pending session,
+  // and the same answer as with no cookie at all.
+  const { readdirSync, statSync } = await import("node:fs");
+  const walk = (d) => readdirSync(d).flatMap((f) => (statSync(join(d, f)).isDirectory() ? walk(join(d, f)) : f === "route.ts" ? [join(d, f)] : []));
+  const apiDir = new URL("../app/api", import.meta.url).pathname;
+  const open = new Set(["auth/[...all]/route.ts", "login-options/route.ts", "version/route.ts"]);
+  let checked = 0;
+  for (const file of walk(apiDir)) {
+    const rel = file.slice(apiDir.length + 1);
+    if (open.has(rel)) continue;
+    const mod = await import(file);
+    for (const m of ["GET", "POST", "PUT", "DELETE", "PATCH"]) {
+      if (typeof mod[m] !== "function") continue;
+      const call = (cookie) => mod[m](new Request(`${PUBLIC}/api/${rel.replace(/\/route\.ts$/, "")}?user=x&ids=a`, {
+        method: m, headers: { ...(cookie ? { cookie } : {}), origin: PUBLIC, "content-type": "application/json" }, body: m === "GET" ? undefined : "{}",
+      }), { params: Promise.resolve({ id: "0123456789abcdef01234567" }) });
+      const withPending = await call(jar.header());
+      const without = await call(null);
+      assert.ok([401, 403].includes(withPending.status), `${rel} ${m}: ${withPending.status}`);
+      assert.equal(withPending.status, without.status, `${rel} ${m}`);
+      checked++;
+    }
   }
+  assert.ok(checked >= 18, `checked ${checked} handlers`);
   // What a pending session may do.
   const st = await authFetch("/second-factor/status", { jar });
   assert.deepEqual(st.json, { signedIn: true, pending: true, enrolled: false, email: "one@corp.example" });
@@ -105,17 +140,20 @@ test("first enrolment: otpauth URI, stored like better-auth's twoFactor, then a 
   const jar = await oidcLogin(A, idp, { sub: "s-2", email: "two@corp.example" });
   const old = sessionRow(jar);
   const e1 = await authFetch("/second-factor/enrol", { jar, method: "POST", body: {} });
-  // Reloading the page shows the same secret until it is confirmed.
+  // Every enrol call makes a new secret (an unconfirmed one is never shown again); the first QR stops working.
+  const firstSecret = base32Decode(new URL(e1.json.totpURI).searchParams.get("secret")).toString("utf8");
   const e2 = await authFetch("/second-factor/enrol", { jar, method: "POST", body: {} });
-  assert.equal(e1.json.totpURI, e2.json.totpURI);
-  const uri = new URL(e1.json.totpURI);
+  assert.notEqual(e1.json.totpURI, e2.json.totpURI);
+  assert.equal(A.db.prepare(`SELECT COUNT(*) n FROM "twoFactor" WHERE "userId" = (SELECT "id" FROM "user" WHERE "email" = 'two@corp.example')`).get().n, 1);
+  assert.equal((await authFetch("/second-factor/verify", { jar, method: "POST", body: { code: codeAt(firstSecret) } })).status, 401);
+  const uri = new URL(e2.json.totpURI);
   assert.equal(uri.protocol, "otpauth:");
   assert.equal(uri.searchParams.get("issuer"), "Paddock");
   const user = userByEmail("two@corp.example");
   const secret = await secretOf(user.id);
   assert.equal(base32Decode(uri.searchParams.get("secret")).toString("utf8"), secret);
   // The same URI better-auth itself would produce for this secret.
-  assert.equal(e1.json.totpURI, createOTP(secret, { digits: 6, period: 30 }).url("Paddock", "two@corp.example"));
+  assert.equal(e2.json.totpURI, createOTP(secret, { digits: 6, period: 30 }).url("Paddock", "two@corp.example"));
   let row = A.db.prepare(`SELECT * FROM "twoFactor" WHERE "userId" = ?`).get(user.id);
   assert.equal(row.verified, 0);
   assert.ok(row.secret.startsWith("$ba$") || /^[0-9a-f]+$/.test(row.secret), "encrypted like better-auth");
@@ -156,7 +194,10 @@ test("first enrolment: otpauth URI, stored like better-auth's twoFactor, then a 
   assert.equal(replay.status, 401);
   // A backup code works once.
   const bc = v.json.backupCodes[3];
-  assert.equal((await authFetch("/second-factor/verify", { jar: jar2, method: "POST", body: { code: bc } })).status, 200);
+  const viaBackup = await authFetch("/second-factor/verify", { jar: jar2, method: "POST", body: { code: bc } });
+  assert.equal(viaBackup.status, 200);
+  // Backup codes are shown only once, on the first enrolment; never again.
+  assert.deepEqual(viaBackup.json, { ok: true });
   const jar3 = await oidcLogin(A, idp, { sub: "s-2", email: "two@corp.example" });
   assert.equal((await authFetch("/second-factor/verify", { jar: jar3, method: "POST", body: { code: bc } })).status, 401);
   // Disabling TOTP is refused for SSO users, even with a verified session.
@@ -271,4 +312,184 @@ test("the gate cannot be skipped by an unsigned or forged cookie, and the state 
   // A client-side "verified" cookie means nothing.
   const extra = new Headers({ cookie: `${jar.header()}; paddock.second_factor=verified; second_factor=verified` });
   assert.equal(await A.sessionFromHeaders(extra), null);
+});
+
+// --- review fixes: concurrency, enrolment, unlink, expiry, counters, growing locks ---
+
+async function enrolled(email, sub) {
+  const jar = await oidcLogin(A, idp, { sub, email });
+  const { secret, userId } = await enrolAndVerify(jar);
+  return { secret, userId, login: () => oidcLogin(A, idp, { sub, email }) };
+}
+const wrongCode = (secret, i) => String((Number(codeAt(secret)) + 1000 + i) % 1e6).padStart(6, "0");
+const verifyBurst = (jar, codes) => Promise.all(codes.map((code) => authFetch("/second-factor/verify", { jar: { header: jar.header, take() {} }, method: "POST", body: { code } })));
+const tally = (rs) => rs.reduce((t, r) => ((t[r.json?.code ?? r.status] = (t[r.json?.code ?? r.status] ?? 0) + 1), t), {});
+const failuresOf = (key) => A.db.prepare("SELECT failures FROM second_factor_failures WHERE key = ?").get(key)?.failures ?? 0;
+
+test("concurrency: 40 parallel wrong codes on one pending session — exactly 5 are evaluated", async () => {
+  const u = await enrolled("burst1@corp.example", "c-1");
+  const jar = await u.login();
+  const sid = sessionRow(jar).id;
+  const t = tally(await verifyBurst(jar, Array.from({ length: 40 }, (_, i) => wrongCode(u.secret, i))));
+  // 4 wrong codes evaluated, the 5th evaluated and revoking; the rest refused unevaluated (revoked or already gone).
+  assert.equal(t.INVALID_CODE, 4, JSON.stringify(t));
+  assert.ok(t.SESSION_REVOKED >= 1, JSON.stringify(t));
+  assert.equal((t.SESSION_REVOKED ?? 0) + (t.NO_SESSION ?? 0), 36, JSON.stringify(t));
+  assert.equal(failuresOf(`u:${u.userId}`), 5, "only the evaluated attempts count for the user");
+  assert.equal(A.db.prepare(`SELECT 1 FROM "session" WHERE "id" = ?`).get(sid), undefined, "the session is revoked");
+});
+
+test("concurrency: a correct code cannot upgrade a session revoked by wrong codes; a burst has at most one winner within the cap", async () => {
+  const u = await enrolled("burst2@corp.example", "c-2");
+  const jar = await u.login();
+  for (let i = 0; i < 5; i++) await authFetch("/second-factor/verify", { jar: { header: jar.header, take() {} }, method: "POST", body: { code: wrongCode(u.secret, i) } });
+  const after = await verifyBurst(jar, [...Array.from({ length: 9 }, (_, i) => wrongCode(u.secret, 20 + i)), codeAt(u.secret, 1)]);
+  assert.ok(after.every((r) => r.status === 401), JSON.stringify(tally(after)));
+  assert.equal(await A.sessionFromHeaders(headersOf(jar)), null);
+  // A fresh session, a burst of 30 with the right code last: never more than one success, never more than 5 evaluated.
+  A.db.prepare("DELETE FROM second_factor_failures WHERE key = ?").run(`u:${u.userId}`);
+  const jar2 = await u.login();
+  const rs = await verifyBurst(jar2, [...Array.from({ length: 29 }, (_, i) => wrongCode(u.secret, 40 + i)), codeAt(u.secret, 1)]);
+  const t = tally(rs);
+  assert.ok((t.ok ?? 0) + (t[200] ?? 0) <= 1, JSON.stringify(t));
+  assert.ok((t.INVALID_CODE ?? 0) + (t[200] ?? 0) <= 5, JSON.stringify(t));
+  const winner = rs.find((r) => r.status === 200);
+  if (winner) {
+    const cookie = winner.res.headers.getSetCookie().find((c) => c.startsWith("better-auth.session_token=")).split(";")[0];
+    assert.ok(await A.sessionFromHeaders(new Headers({ cookie })), "the one winner's new session works");
+  }
+});
+
+test("concurrency: the same valid code on two pending sessions at once — exactly one succeeds", async () => {
+  const u = await enrolled("replay2@corp.example", "c-3");
+  const [a, b] = [await u.login(), await u.login()];
+  const code = codeAt(u.secret, 1);
+  const rs = await Promise.all([a, b].map((jar) => authFetch("/second-factor/verify", { jar: { header: jar.header, take() {} }, method: "POST", body: { code } })));
+  assert.deepEqual(rs.map((r) => r.status).sort(), [200, 401]);
+});
+
+test("enrolment: concurrent first enrols make one row; every call a new secret; only the latest works; the other session's secret is never shown", async () => {
+  const email = "race@corp.example";
+  const jars = [];
+  for (let i = 0; i < 5; i++) jars.push(await oidcLogin(A, idp, { sub: "c-4", email }));
+  const rs = await Promise.all(jars.map((jar) => authFetch("/second-factor/enrol", { jar, method: "POST", body: {} })));
+  assert.ok(rs.every((r) => r.status === 200));
+  const user = userByEmail(email);
+  assert.equal(A.db.prepare(`SELECT COUNT(*) n FROM "twoFactor" WHERE "userId" = ?`).get(user.id).n, 1);
+  const secrets = rs.map((r) => base32Decode(new URL(r.json.totpURI).searchParams.get("secret")).toString("utf8"));
+  assert.equal(new Set(secrets).size, 5, "no session ever gets another one's secret");
+  const stored = await secretOf(user.id);
+  assert.ok(secrets.includes(stored));
+  // "Victim" scans an earlier QR: refused (an attacker's later enrol only invalidates it, it never learns the victim's).
+  const stale = secrets.find((x) => x !== stored);
+  assert.equal((await authFetch("/second-factor/verify", { jar: jars[0], method: "POST", body: { code: codeAt(stale) } })).status, 401);
+  const owner = jars[secrets.indexOf(stored)];
+  assert.equal((await authFetch("/second-factor/verify", { jar: owner, method: "POST", body: { code: codeAt(stored) } })).status, 200);
+  // Once confirmed, nobody's enrol returns a secret any more, and the old unconfirmed ones never work.
+  const later = await oidcLogin(A, idp, { sub: "c-4", email });
+  const again = await authFetch("/second-factor/enrol", { jar: later, method: "POST", body: {} });
+  assert.equal(again.status, 409);
+  assert.equal(again.json.totpURI, undefined);
+  for (const sec of secrets.filter((x) => x !== stored)) assert.equal((await authFetch("/second-factor/verify", { jar: later, method: "POST", body: { code: codeAt(sec, 1) } })).status, 401);
+});
+
+test("legacy twoFactor rows with verified NULL count as set up: enrol refuses and reveals nothing", async () => {
+  const email = "legacy@corp.example";
+  const jar = await oidcLogin(A, idp, { sub: "c-5", email });
+  await authFetch("/second-factor/enrol", { jar, method: "POST", body: {} });
+  const user = userByEmail(email);
+  A.db.prepare(`UPDATE "twoFactor" SET "verified" = NULL WHERE "userId" = ?`).run(user.id);
+  assert.equal((await authFetch("/second-factor/status", { jar })).json.enrolled, true);
+  const r = await authFetch("/second-factor/enrol", { jar, method: "POST", body: {} });
+  assert.equal(r.status, 409);
+  assert.deepEqual(Object.keys(r.json).sort(), ["code", "message"]);
+  // And its code is accepted as a normal (not a first) verification: no backup codes are returned.
+  const v = await authFetch("/second-factor/verify", { jar, method: "POST", body: { code: codeAt(await secretOf(user.id)) } });
+  assert.deepEqual([v.status, v.json], [200, { ok: true }]);
+});
+
+test("the SSO account cannot be unlinked, even from a verified session", async () => {
+  const jar = await oidcLogin(A, idp, { sub: "c-6", email: "unlink@corp.example" });
+  const { userId } = await enrolAndVerify(jar);
+  const acc = A.db.prepare(`SELECT "id", "accountId" FROM "account" WHERE "userId" = ? AND "providerId" = 'oidc'`).get(userId);
+  const r = await authFetch("/unlink-account", { jar, method: "POST", body: { providerId: "oidc", accountId: acc.accountId } });
+  assert.deepEqual([r.status, r.json.code], [403, "SSO_ACCOUNT_REQUIRED"]);
+  assert.ok(A.db.prepare(`SELECT 1 FROM "account" WHERE "id" = ?`).get(acc.id));
+});
+
+test("an expired pending session is no session for the second-factor endpoints either", async () => {
+  const jar = await oidcLogin(A, idp, { sub: "c-7", email: "expired@corp.example" });
+  A.db.prepare(`UPDATE "session" SET "expiresAt" = ? WHERE "token" = ?`).run(new Date(Date.now() - 1000).toISOString(), jar.sessionToken());
+  assert.deepEqual((await authFetch("/second-factor/status", { jar })).json, { signedIn: false, pending: false, enrolled: false });
+  assert.equal((await authFetch("/second-factor/enrol", { jar, method: "POST", body: {} })).json.code, "NO_SESSION");
+  assert.equal((await authFetch("/second-factor/verify", { jar, method: "POST", body: { code: "123456" } })).json.code, "NO_SESSION");
+});
+
+test("enrol and verify need a pending session: verified and password sessions get NOT_PENDING, nothing is stored", async () => {
+  const jar = await oidcLogin(A, idp, { sub: "c-8", email: "np@corp.example" });
+  await enrolAndVerify(jar);
+  assert.equal((await authFetch("/second-factor/enrol", { jar, method: "POST", body: {} })).json.code, "NOT_PENDING");
+  assert.equal((await authFetch("/second-factor/verify", { jar, method: "POST", body: { code: "123456" } })).json.code, "NOT_PENDING");
+  const ctx = await A.auth.$context;
+  const u = await ctx.internalAdapter.createUser({ email: "np-pw@hub.local", name: "np", emailVerified: true });
+  await ctx.internalAdapter.linkAccount({ userId: u.id, providerId: "credential", accountId: u.id, password: await ctx.password.hash("np-password-12345") });
+  const pj = cookieJar();
+  await authFetch("/sign-in/email", { jar: pj, method: "POST", body: { email: "np-pw@hub.local", password: "np-password-12345" } });
+  assert.equal((await authFetch("/second-factor/enrol", { jar: pj, method: "POST", body: {} })).json.code, "NOT_PENDING");
+  assert.equal(A.db.prepare(`SELECT COUNT(*) n FROM "twoFactor" WHERE "userId" = ?`).get(u.id).n, 0);
+});
+
+test("a success resets the user's counter: the next 10 attempts are counted from zero", async () => {
+  const u = await enrolled("reset@corp.example", "c-9");
+  const a = await u.login();
+  for (let i = 0; i < 4; i++) assert.equal((await authFetch("/second-factor/verify", { jar: a, method: "POST", body: { code: wrongCode(u.secret, i) } })).json.code, "INVALID_CODE");
+  assert.equal((await authFetch("/second-factor/verify", { jar: a, method: "POST", body: { code: codeAt(u.secret, 1) } })).status, 200);
+  const b = await u.login();
+  const cb = [];
+  for (let i = 0; i < 5; i++) cb.push((await authFetch("/second-factor/verify", { jar: b, method: "POST", body: { code: wrongCode(u.secret, 10 + i) } })).json.code);
+  assert.deepEqual(cb, ["INVALID_CODE", "INVALID_CODE", "INVALID_CODE", "INVALID_CODE", "SESSION_REVOKED"]);
+  const c = await u.login();
+  const cc = [];
+  for (let i = 0; i < 4; i++) cc.push((await authFetch("/second-factor/verify", { jar: c, method: "POST", body: { code: wrongCode(u.secret, 20 + i) } })).json.code);
+  assert.deepEqual(cc, ["INVALID_CODE", "INVALID_CODE", "INVALID_CODE", "INVALID_CODE"]);
+});
+
+test("locks grow (15 → 30 min), are logged without secrets, and a hard lock needs the admin", async () => {
+  const u = await enrolled("grow@corp.example", "c-10");
+  const key = `u:${u.userId}`;
+  const logged = [];
+  const warn = console.warn;
+  console.warn = (line) => logged.push(String(line));
+  try {
+    const lockOnce = async () => {
+      for (let s = 0; s < 2; s++) {
+        const jar = await u.login();
+        for (let i = 0; i < 5; i++) await authFetch("/second-factor/verify", { jar, method: "POST", body: { code: wrongCode(u.secret, s * 5 + i) } });
+      }
+      return A.db.prepare("SELECT locked_until, locks FROM second_factor_failures WHERE key = ?").get(key);
+    };
+    const t0 = Date.now();
+    const first = await lockOnce();
+    assert.equal(first.locks, 1);
+    assert.ok(Math.abs(first.locked_until - t0 - 15 * 60_000) < 60_000, String(first.locked_until - t0));
+    // The lock runs out (and a new window starts); the next lock is twice as long.
+    A.db.prepare("UPDATE second_factor_failures SET locked_until = 0, first_at = 0 WHERE key = ?").run(key);
+    const second = await lockOnce();
+    assert.equal(second.locks, 2);
+    assert.ok(Math.abs(second.locked_until - Date.now() - 30 * 60_000) < 60_000);
+    const locks = logged.map((l) => JSON.parse(l)).filter((l) => l.event === "second-factor-lock");
+    assert.equal(locks.length, 2);
+    assert.deepEqual(Object.keys(locks[0]).sort(), ["event", "hard", "locks", "until", "user"]);
+    assert.equal(locks[0].user, u.userId);
+    assert.ok(!logged.join("\n").includes(u.secret));
+    // Hard lock: even the right code, until the admin deletes the row.
+    A.db.prepare("UPDATE second_factor_failures SET locked_until = ? WHERE key = ?").run(Number.MAX_SAFE_INTEGER, key);
+    const jar = await u.login();
+    const r = await authFetch("/second-factor/verify", { jar, method: "POST", body: { code: codeAt(u.secret, 1) } });
+    assert.deepEqual([r.status, r.json.code], [429, "LOCKED_HARD"]);
+    A.db.prepare("DELETE FROM second_factor_failures WHERE key = ?").run(key);
+    assert.equal((await authFetch("/second-factor/verify", { jar, method: "POST", body: { code: codeAt(u.secret, 1) } })).status, 200);
+  } finally {
+    console.warn = warn;
+  }
 });

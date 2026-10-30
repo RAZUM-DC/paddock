@@ -16,7 +16,8 @@ const call = async (path: string, body?: unknown) => {
 };
 
 function errorText(status: number, code: string) {
-  if (code === "LOCKED" || status === 429) return t("Too many attempts. Try again in 15 minutes.");
+  if (code === "LOCKED_HARD") return t("Your second factor is locked after too many wrong codes. Ask an administrator to unlock it.");
+  if (code === "LOCKED" || status === 429) return t("Too many attempts. Try again later.");
   if (code === "SESSION_REVOKED") return t("Too many wrong codes. Sign in again.");
   if (code === "INVALID_CODE") return t("Invalid code");
   if (code === "NOT_PENDING") return t("Already verified.");

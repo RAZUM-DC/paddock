@@ -15,9 +15,9 @@ import { APIError, createAuthEndpoint, createAuthMiddleware } from "better-auth/
 import { deleteSessionCookie, setSessionCookie } from "better-auth/cookies";
 import { symmetricDecrypt, symmetricEncrypt } from "better-auth/crypto";
 import {
-  allowedWhilePending, classifyNewSession, cleanupSecondFactor, forgetSession, hasOidcAccount, isPending, lastTotpStep, lockedUntil, matchBackupCode,
-  matchTotp, MAX_SESSION_FAILURES, MAX_USER_FAILURES, newBackupCodes, newTotpSecret, recordFailure, resetFailures, saveTotpStep, sessionState,
-  setSessionState, setupSecondFactorTables, totpKey, totpUri, type SessionState,
+  allowedWhilePending, beginAttempt, classifyNewSession, cleanupSecondFactor, consumeSuccess, hasOidcAccount, isPending, lastTotpStep, matchBackupCode,
+  matchTotp, MAX_SESSION_FAILURES, newBackupCodes, newTotpSecret, randomString, revokeSession, sessionState, setSessionState,
+  setupSecondFactorTables, storeEnrolment, totpKey, totpUri, forgetSession, HARD_LOCKED, type SessionState,
 } from "./second-factor-core";
 
 type TwoFactorRow = { id: string; secret: string; backupCodes: string; userId: string; verified?: boolean | number | null };
@@ -28,6 +28,13 @@ const CLEANUP_EVERY_MS = 10 * 60_000;
 
 const refuse = (status: "FORBIDDEN" | "UNAUTHORIZED" | "BAD_REQUEST" | "CONFLICT" | "TOO_MANY_REQUESTS", code: string, message: string) => new APIError(status, { code, message });
 
+// One line per lock, for the admin; no codes, no secrets.
+function logLock(userId: string, c: { lockedUntil: number; locks: number } | null) {
+  if (!c) return;
+  const hard = c.lockedUntil === HARD_LOCKED;
+  console.warn(JSON.stringify({ event: "second-factor-lock", user: userId, locks: c.locks, hard, until: hard ? null : new Date(c.lockedUntil).toISOString() }));
+}
+
 export function secondFactorPlugin(db: Database.Database, providerId: string) {
   let lastCleanup = 0;
   const tables = () => setupSecondFactorTables(db);
@@ -37,7 +44,8 @@ export function secondFactorPlugin(db: Database.Database, providerId: string) {
     const token = await ctx.getSignedCookie(ctx.context.authCookies.sessionToken.name, ctx.context.secret).catch(() => null);
     if (!token) return null;
     const found = await ctx.context.internalAdapter.findSession(token);
-    if (!found || new Date(found.session.expiresAt).getTime() <= Date.now()) return null;
+    // Expiry checked here, not left to the adapter: an expired session is no session, pending or not.
+    if (!found || !(new Date(found.session.expiresAt).getTime() > Date.now())) return null;
     return found;
   }
 
@@ -57,11 +65,14 @@ export function secondFactorPlugin(db: Database.Database, providerId: string) {
       cleanupSecondFactor(db);
     }
     const { session, user } = found;
+    if (isPending(db, session.id, user.id, providerId) && !allowedWhilePending(ctx.path)) throw refuse("FORBIDDEN", "SECOND_FACTOR_REQUIRED", "Second factor required");
+    // For any session: the SSO account cannot be unlinked (otherwise unlink, then disable) and TOTP cannot be disabled
+    // while the user has an SSO account.
+    const body = ctx.body as { providerId?: unknown } | undefined;
+    if (ctx.path === "/unlink-account" && body?.providerId === providerId)
+      throw refuse("FORBIDDEN", "SSO_ACCOUNT_REQUIRED", "The single sign-on account cannot be unlinked while two-factor authentication is required for it");
     if (ctx.path === "/two-factor/disable" && hasOidcAccount(db, user.id, providerId))
       throw refuse("FORBIDDEN", "TOTP_REQUIRED_FOR_SSO", "Two-factor authentication is required for single sign-on users and cannot be disabled");
-    if (!isPending(db, session.id, user.id, providerId)) return;
-    if (allowedWhilePending(ctx.path)) return;
-    throw refuse("FORBIDDEN", "SECOND_FACTOR_REQUIRED", "Second factor required");
   });
 
   const status = createAuthEndpoint("/second-factor/status", { method: "GET" }, async (ctx) => {
@@ -72,23 +83,16 @@ export function secondFactorPlugin(db: Database.Database, providerId: string) {
     return ctx.json({ signedIn: true, pending: isPending(db, found.session.id, found.user.id, providerId), enrolled: enrolled(row), email: found.user.email });
   });
 
-  // First enrolment of a pending session's user: a new (or the not yet confirmed) secret, as an otpauth URI.
+  // First enrolment of a pending session's user: a NEW secret and new backup codes on every call (an unconfirmed
+  // enrolment of another session is replaced, never shown); a confirmed one is never touched or revealed.
   const enrol = createAuthEndpoint("/second-factor/enrol", { method: "POST" }, async (ctx) => {
     const found = await cookieSession(ctx);
     if (!found) throw refuse("UNAUTHORIZED", "NO_SESSION", "Sign in first");
     tables();
     if (!isPending(db, found.session.id, found.user.id, providerId)) throw refuse("BAD_REQUEST", "NOT_PENDING", "No second factor is pending for this session");
-    const row = await twoFactorRow(ctx, found.user.id);
-    if (enrolled(row)) throw refuse("CONFLICT", "ALREADY_ENROLLED", "An authenticator app is already set up; enter its code");
-    let secret: string;
-    if (row) secret = await decrypt(ctx, row.secret);
-    else {
-      secret = newTotpSecret();
-      await ctx.context.adapter.create({
-        model: "twoFactor",
-        data: { secret: await encrypt(ctx, secret), backupCodes: await encrypt(ctx, JSON.stringify(newBackupCodes())), userId: found.user.id, verified: false },
-      });
-    }
+    const secret = newTotpSecret();
+    const stored = storeEnrolment(db, found.user.id, await encrypt(ctx, secret), await encrypt(ctx, JSON.stringify(newBackupCodes())), randomString(32));
+    if (stored === "enrolled") throw refuse("CONFLICT", "ALREADY_ENROLLED", "An authenticator app is already set up; enter its code");
     const uri = totpUri(secret, ISSUER, found.user.email);
     return ctx.json({ totpURI: uri, secret: new URL(uri).searchParams.get("secret") });
   });
@@ -101,7 +105,15 @@ export function secondFactorPlugin(db: Database.Database, providerId: string) {
     if (!isPending(db, session.id, user.id, providerId)) throw refuse("BAD_REQUEST", "NOT_PENDING", "No second factor is pending for this session");
     const userKey = `u:${user.id}`;
     const sessionKey = `s:${session.id}`;
-    if (lockedUntil(db, userKey)) throw refuse("TOO_MANY_REQUESTS", "LOCKED", "Too many wrong codes; try again in 15 minutes");
+    // Counted before anything is awaited (see beginAttempt): concurrent guesses cannot exceed the limits.
+    const attempt = beginAttempt(db, userKey, sessionKey);
+    if (!attempt.ok && attempt.reason === "locked") throw (attempt.until === HARD_LOCKED ? refuse("TOO_MANY_REQUESTS", "LOCKED_HARD", "Locked; ask an admin") : refuse("TOO_MANY_REQUESTS", "LOCKED", "Too many wrong codes; try again later"));
+    if (!attempt.ok) {
+      revokeSession(db, session.id);
+      deleteSessionCookie(ctx);
+      throw refuse("UNAUTHORIZED", "SESSION_REVOKED", "Too many wrong codes; sign in again");
+    }
+
     const row = await twoFactorRow(ctx, user.id);
     if (!row) throw refuse("BAD_REQUEST", "NOT_ENROLLED", "Set up an authenticator app first");
     const confirming = !enrolled(row);
@@ -109,47 +121,48 @@ export function secondFactorPlugin(db: Database.Database, providerId: string) {
     const code = typeof raw === "string" ? raw.replace(/\s+/g, "").slice(0, 64) : "";
 
     let step: number | null = null;
-    let ok = false;
+    let backup: { rowId: string; before: string; after: string } | null = null;
     if (/^\d{6}$/.test(code)) {
       step = matchTotp(totpKey(await decrypt(ctx, row.secret)), code, Date.now(), { lastStep: lastTotpStep(db, user.id) });
-      ok = step !== null;
     } else if (!confirming && code) {
       const codes = JSON.parse(await decrypt(ctx, row.backupCodes)) as string[];
       const i = matchBackupCode(codes, code);
-      if (i >= 0) {
-        ok = true;
-        codes.splice(i, 1);
-        await ctx.context.adapter.update({ model: "twoFactor", where: [{ field: "id", value: row.id }], update: { backupCodes: await encrypt(ctx, JSON.stringify(codes)) } });
-      }
+      if (i >= 0) backup = { rowId: row.id, before: row.backupCodes, after: await encrypt(ctx, JSON.stringify(codes.filter((_, j) => j !== i))) };
     }
 
-    if (!ok) {
-      recordFailure(db, userKey, MAX_USER_FAILURES);
-      if (recordFailure(db, sessionKey, MAX_SESSION_FAILURES) >= MAX_SESSION_FAILURES) {
-        // Too many guesses on one session: it is gone, the person signs in through SSO again.
-        await ctx.context.internalAdapter.deleteSession(session.token);
-        forgetSession(db, session.id);
+    // All checks and the consumption of the session, the step or the backup code happen in one transaction.
+    const result = step !== null || backup
+      ? consumeSuccess(db, { sessionId: session.id, userId: user.id, userKey, sessionKey, step, backup, confirm: confirming ? { rowId: row.id, secret: row.secret } : null }, providerId)
+      : "wrong";
+    if (result !== "ok") {
+      if (result === "gone") {
         deleteSessionCookie(ctx);
+        throw refuse("UNAUTHORIZED", "SESSION_REVOKED", "This sign-in is no longer valid; sign in again");
+      }
+      if (attempt.session.count >= MAX_SESSION_FAILURES) {
+        // The last attempt of this session failed: it is gone, the person signs in through SSO again.
+        revokeSession(db, session.id);
+        deleteSessionCookie(ctx);
+        logLock(user.id, attempt.user.newLock ? attempt.user : null);
         throw refuse("UNAUTHORIZED", "SESSION_REVOKED", "Too many wrong codes; sign in again");
+      }
+      if (attempt.user.newLock) {
+        logLock(user.id, attempt.user);
+        throw (attempt.user.lockedUntil === HARD_LOCKED ? refuse("TOO_MANY_REQUESTS", "LOCKED_HARD", "Locked; ask an admin") : refuse("TOO_MANY_REQUESTS", "LOCKED", "Too many wrong codes; try again later"));
       }
       throw refuse("UNAUTHORIZED", "INVALID_CODE", "Invalid code");
     }
 
-    resetFailures(db, sessionKey);
-    resetFailures(db, userKey);
-    if (step !== null) saveTotpStep(db, user.id, step);
     let backupCodes: string[] | undefined;
     let current = user;
     if (confirming) {
-      await ctx.context.adapter.update({ model: "twoFactor", where: [{ field: "id", value: row.id }], update: { verified: true } });
       current = (await ctx.context.internalAdapter.updateUser(user.id, { twoFactorEnabled: true })) ?? user;
       backupCodes = JSON.parse(await decrypt(ctx, row.backupCodes));
     }
-    // A new session (new token) replaces the one that was pending: nothing learnt before the second factor is useful.
+    // The pending session is already deleted (consumeSuccess); a new one (new token) replaces it.
     const fresh = await ctx.context.internalAdapter.createSession(user.id, false, session);
     setSessionState(db, fresh.id, user.id, "verified");
     await setSessionCookie(ctx, { session: fresh, user: current });
-    await ctx.context.internalAdapter.deleteSession(session.token);
     forgetSession(db, session.id);
     return ctx.json({ ok: true, ...(backupCodes ? { backupCodes } : {}) });
   });

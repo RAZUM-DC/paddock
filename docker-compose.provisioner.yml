@@ -34,8 +34,13 @@ networks:
   # harness can steer (its own traffic, or the egress proxy) can reach the provisioner.
   control:
     internal: true
-  # web → the gost API of egress. A fixed subnet, so gost can admit only this network on the API port
-  # (docs/services/egress/gost.example.yaml, hardened variant). Change it if it overlaps a network you have.
+    # Every network here has a fixed subnet: one left to the default pool can take a subnet another one is about to
+    # claim (compose creates them in parallel) and fail with "Pool overlaps".
+    ipam:
+      config:
+        - subnet: ${PADDOCK_CONTROL_SUBNET:-172.20.9.0/24}
+  # web → the gost API of egress (egress-api:18080). gost serves its API on every interface, so a host firewall should
+  # allow port 18080 only on this bridge (pd-eapi). Change the subnet if it overlaps a network you have.
   egress-api:
     internal: true
     driver_opts:
@@ -65,7 +70,10 @@ services:
   egress:
     container_name: paddock-egress
     networks:
-      core: {}
+      # Static, so the host firewall can drop connections egress opens on core (DNS rebinding through the proxy to
+      # a core address, e.g. <core ip>.nip.io); EGRESS_MAC does the same on user networks (provisioner).
+      core:
+        ipv4_address: ${PADDOCK_EGRESS_IP:-172.20.1.251}
       outside: {}
       egress-api:
         aliases: [egress-api]

@@ -51,6 +51,11 @@ test("the value is handed out exactly once, then wiped", () => {
   assert.equal(s.heldValues(), 0);
   assert.deepEqual(s.collect("alice", r.id, 5), { status: "consumed" });
   assert.throws(() => s.fulfil("alice", r.id, "again", 6), /consumed/);
+  // A filled-in request cannot be filled in again before it is collected.
+  const r2 = s.create("alice", req(), 10);
+  s.fulfil("alice", r2.id, "first", 11);
+  assert.throws(() => s.fulfil("alice", r2.id, "second", 12), (e) => e.status === 409);
+  assert.equal(s.collect("alice", r2.id, 13).value, "first");
 });
 
 test("decline and cancel", () => {

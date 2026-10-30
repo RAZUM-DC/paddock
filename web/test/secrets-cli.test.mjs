@@ -92,6 +92,13 @@ test("writeSecretFile: creates with mode 600, replaces the line, keeps the rest"
     writeSecretFile(f, "KEY", "new");
     assert.equal(readFileSync(f, "utf8"), "A=1\nKEY=new\n");
     assert.equal(statSync(f).mode & 0o777, 0o600);
+    // A symlink planted at the temp name is not followed.
+    const victim = join(dir, "victim");
+    writeFileSync(victim, "keep\n");
+    symlinkSync(victim, `${f}.paddock-fixed.tmp`);
+    assert.throws(() => writeSecretFile(f, "KEY", "leak", "fixed"), /EEXIST/);
+    assert.equal(readFileSync(victim, "utf8"), "keep\n");
+    assert.equal(readFileSync(f, "utf8"), "A=1\nKEY=new\n");
   } finally {
     rmSync(dir, { recursive: true });
   }

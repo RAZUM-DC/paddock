@@ -102,10 +102,11 @@ export function parseArgs(argv) {
   return opts;
 }
 
-// Write atomically with mode 600: a temp file next to the target, then rename.
-export function writeSecretFile(path, name, value) {
+// Write atomically with mode 600: a temp file next to the target, then rename. The temp file is created exclusively
+// ("wx"), so a file or symlink planted under that name is never followed or overwritten.
+export function writeSecretFile(path, name, value, suffix = randomBytes(6).toString("hex")) {
   const before = existsSync(path) ? readFileSync(path, "utf8") : "";
-  const tmp = `${path}.paddock-${randomBytes(6).toString("hex")}.tmp`;
+  const tmp = `${path}.paddock-${suffix}.tmp`;
   writeFileSync(tmp, upsertEnvLine(before, name, value), { mode: 0o600, flag: "wx" });
   chmodSync(tmp, 0o600);
   renameSync(tmp, path);

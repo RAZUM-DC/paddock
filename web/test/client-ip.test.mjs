@@ -61,6 +61,8 @@ test("server.ts normalises every request except /api/harness/*, and every WS upg
   assert.match(src, /if \(isHarnessApiPath\(req\.url\)\) return void harnessApi\(req, res\);\n\s*normalizeForwarded\(req\.headers, req\.socket\.remoteAddress, proxyTrust\);\n\s*return handle\(req, res\);/);
   assert.match(src, /server\.on\("upgrade", async \(req, socket, head\) => \{\n\s*normalizeForwarded\(req\.headers, req\.socket\.remoteAddress, proxyTrust\);/);
   assert.match(src, /parseTrustList\(process\.env\.TRUSTED_PROXIES \?\? DEFAULT_TRUSTED_PROXIES\)/);
+  // The edge's name is resolved at start and again later (a recreated edge may get a new address).
+  assert.match(src, /await proxyTrust\.refresh\(\);\nsetInterval\(\(\) => void proxyTrust\.refresh\(\), 60_000\)\.unref\(\);/);
   assert.match(readFileSync(new URL("../lib/auth.ts", import.meta.url), "utf8"), /trustedProxies: trustedHops\(process\.env\.TRUSTED_PROXY_HOPS\)/);
 });
 

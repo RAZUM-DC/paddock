@@ -15,13 +15,12 @@ export const gitAccounts = (): GitAccountStore => (g.__paddockGitAccounts ??= gi
 // PADDOCK_HARNESS_API=0 switches off everything harnesses call (git credentials, secret requests).
 export const harnessApiEnabled = () => process.env.PADDOCK_HARNESS_API !== "0";
 
-const publicUrl = () => process.env.PUBLIC_URL ?? "http://localhost:3000";
-
-// Any signed-in user, for their own data. Mutations only from our own origin (the same rule as requireAdmin).
+// Any signed-in user, for their own data. Mutations only from our own origin: exactly the rule of requireAdmin
+// (lib/proxy.ts) and /api/harness, so with PUBLIC_URL unset no mutation is accepted at all.
 export async function requireUser(req: Request): Promise<{ userId: string; harnessId: string } | Response> {
   const session = await auth.api.getSession({ headers: req.headers }).catch(() => null);
   if (!session) return Response.json({ error: "unauthorized" }, { status: 401 });
-  if (req.method !== "GET" && req.method !== "HEAD" && req.headers.get("origin") !== publicUrl()) return Response.json({ error: "bad origin" }, { status: 403 });
+  if (req.method !== "GET" && req.headers.get("origin") !== process.env.PUBLIC_URL) return Response.json({ error: "bad origin" }, { status: 403 });
   let harnessId: string;
   try {
     harnessId = harnessIdOf(session.user);

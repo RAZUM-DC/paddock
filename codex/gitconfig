@@ -1,0 +1,9 @@
+# System git config of the Paddock harness image (/etc/gitconfig).
+# Git tokens come from the accounts the user adds in Paddock (Settings → Git), through the credential helper;
+# nothing is stored in the container. useHttpPath lets an account be limited to repositories under a path prefix.
+[credential]
+	helper = /usr/local/bin/git-credential-paddock
+	useHttpPath = true
+# Commit identity (user.name / user.email), written by Paddock into the harness home. A missing file is ignored.
+[include]
+	path = /home/codex/.codex/paddock/gitconfig

@@ -14,6 +14,10 @@ RUN apt-get update \
 
 COPY --chown=codex:codex config.toml paddock.rules /opt/codex/
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+# Git: tokens from Paddock's per-user git accounts through a credential helper, identity from the harness home.
+COPY git-credential-paddock /usr/local/bin/git-credential-paddock
+COPY gitconfig /etc/gitconfig
+RUN chmod 755 /usr/local/bin/git-credential-paddock && chmod 644 /etc/gitconfig
 
 USER codex
 WORKDIR /workspace

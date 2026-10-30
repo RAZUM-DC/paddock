@@ -14,3 +14,8 @@ links:
 `EDGE_BIND` in `.env` decides which address to listen on (default `127.0.0.1`; from outside, use an SSH tunnel).
 Public access: a domain + HTTPS on an external nginx/Traefik, and `PUBLIC_URL=https://…` in `secrets/web.env`
 (the Origin check depends on it). See roadmap 3.10.
+
+`/api/harness/*` is answered 404 here: those routes are for harness containers inside the Docker network only (git
+credentials, secret requests). Web refuses them too when a request carries `X-Forwarded-For`, so any other reverse
+proxy in front of web must set that header (nginx and Traefik do by default). If web's port is ever published without
+a proxy, `/api/harness/*` is still protected by the per-harness token, but block the prefix there as well.

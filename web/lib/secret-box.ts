@@ -40,7 +40,8 @@ export function open(key: Buffer, sealed: string, aad: string): string {
   if (!sealed.startsWith(VERSION)) throw new Error("unknown secret format");
   const buf = Buffer.from(sealed.slice(VERSION.length), "base64url");
   if (buf.length < IV + TAG) throw new Error("secret too short");
-  const d = createDecipheriv("aes-256-gcm", key, buf.subarray(0, IV));
+  // A fixed 16-byte tag: GCM would otherwise accept truncated tags.
+  const d = createDecipheriv("aes-256-gcm", key, buf.subarray(0, IV), { authTagLength: TAG });
   d.setAuthTag(buf.subarray(IV, IV + TAG));
   d.setAAD(Buffer.from(aad, "utf8"));
   return Buffer.concat([d.update(buf.subarray(IV + TAG)), d.final()]).toString("utf8");

@@ -98,8 +98,16 @@ function SecretRequestCard({ req, who, onDone }: { req: SecretRequest; who: stri
       <div className="space-y-0.5 rounded-lg bg-[var(--panel-2)] px-2.5 py-2 font-mono text-xs">
         <div><span className="text-[var(--faint)]">{t("name")} </span>{req.name}</div>
         <div className="truncate" title={req.file}><span className="text-[var(--faint)]">{t("file")} </span>{req.file}</div>
-        {req.reason && <div className="whitespace-pre-wrap break-words font-sans text-[var(--muted)]">{req.reason}</div>}
+        {req.reason && (
+          <div className="whitespace-pre-wrap break-words pt-1 font-sans text-[var(--muted)]">
+            <span className="text-[var(--faint)]">{t("The agent says:")} </span>“{req.reason}”
+          </div>
+        )}
       </div>
+      {/* Fixed text, not the agent's: the request itself is written by the agent and could ask for anything. */}
+      <p className="rounded-lg border border-[var(--red)]/40 bg-[var(--red)]/[0.06] px-2.5 py-1.5 text-xs text-[var(--red)]">
+        {t("Never enter your Paddock, SSO or corporate account password here. This form hands the value to the agent.")}
+      </p>
       {!finished && (
         <div className="flex gap-2">
           {/* A hidden username field keeps password managers from filling in the user's Paddock login here. */}

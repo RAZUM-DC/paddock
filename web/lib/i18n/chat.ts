@@ -148,6 +148,8 @@ const ru: Record<string, string> = {
   "Hide": "Скрыть",
   "Show": "Показать",
   "Decline": "Отклонить",
+  "The agent says:": "Агент пишет:",
+  "Never enter your Paddock, SSO or corporate account password here. This form hands the value to the agent.": "Никогда не вводите здесь пароль от Paddock, SSO или корпоративной учётной записи. Эта форма передаёт значение агенту.",
   "The value goes into the file only, not into the chat. It is not stored by Paddock.": "Значение попадёт только в файл, не в чат. Paddock его не хранит.",
 };
 

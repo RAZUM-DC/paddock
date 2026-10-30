@@ -9,13 +9,14 @@ import {
   allowedWhilePending, base32Decode, base32Encode, beginAttempt, classifyNewSession, cleanupSecondFactor, consumeSuccess, countAttempt, hotp, isPending, lastTotpStep, lockedUntil,
   LOCK_MS, LOCK_MEMORY_MS, lockDuration, matchBackupCode, matchTotp, MAX_LOCK_MS, MAX_SESSION_FAILURES, MAX_USER_FAILURES, HARD_LOCK_AFTER, HARD_LOCKED, newBackupCodes, newTotpSecret,
   PERIOD, resetFailures, revokeSession, safeNext, saveTotpStep, secondFactorPageAction, secondFactorRequired, sessionState, setSessionState, setupSecondFactorTables, storeEnrolment,
-  totpKey, totpUri, FAILURE_WINDOW_MS,
+  totpKey, totpUri, FAILURE_WINDOW_MS, inheritedState, MAX_BACKUP_WHILE_LOCKED, BACKUP_WINDOW_MS, backupKeyOf,
 } from "../lib/second-factor-core.ts";
 
 function db() {
   const d = new Database(":memory:");
   d.exec(`CREATE TABLE "account" ("id" text primary key, "accountId" text, "providerId" text, "userId" text);
     CREATE TABLE "session" ("id" text primary key, "expiresAt" date not null, "token" text, "userId" text);
+    CREATE TABLE "user" ("id" text primary key, "twoFactorEnabled" integer);
     CREATE TABLE "twoFactor" ("id" text not null primary key, "secret" text not null, "backupCodes" text not null, "userId" text not null, "verified" integer, "failedVerificationCount" integer, "lockedUntil" date)`);
   setupSecondFactorTables(d);
   return d;
@@ -35,7 +36,8 @@ test("classifyNewSession: OIDC callback pending, password paths exempt, the rest
   assert.equal(classifyNewSession("/oauth2/callback/:providerId", { providerId: "oidc" }, "oidc"), "pending");
   assert.equal(classifyNewSession("/callback/:id", { id: "github" }, "oidc"), null);
   for (const p of ["/sign-in/email", "/two-factor/verify-totp", "/two-factor/verify-backup-code", "/two-factor/verify-otp"]) assert.equal(classifyNewSession(p, {}, "oidc"), "exempt", p);
-  for (const p of ["/change-password", "/two-factor/enable", "/second-factor/verify", "/sign-in/social", undefined, ""]) assert.equal(classifyNewSession(p, {}, "oidc"), null, String(p));
+  assert.equal(classifyNewSession("/sign-in/social", {}, "oidc"), "pending", "the id_token branch of sign-in/social is an SSO sign-in");
+  for (const p of ["/change-password", "/two-factor/enable", "/second-factor/verify", undefined, ""]) assert.equal(classifyNewSession(p, {}, "oidc"), null, String(p));
 });
 
 test("allowedWhilePending: only sign-out, sign-in and the second-factor endpoints", () => {
@@ -168,14 +170,21 @@ test("consumeSuccess: one winner, nothing half-done", () => {
   assert.equal(lastTotpStep(d, "u"), 100, "rolled back");
   assert.equal(consumeSuccess(d, { ...base("b"), backup: { rowId: "tf", before: "list-v1", after: "list-v2" } }, "oidc", now), "ok");
   assert.equal(d.prepare(`SELECT "backupCodes" b FROM "twoFactor"`).get().b, "list-v2");
-  // First enrolment: only the unconfirmed row with the secret that was checked.
+  // First enrolment: only the unconfirmed row with the secret that was checked; the user's flag in the same transaction.
   d.prepare(`INSERT INTO "twoFactor" VALUES ('tf2', 'enc-new', 'codes', 'v', 0, 0, NULL)`).run();
   liveSession(d, "c", "v", now);
   const cv = { ...base("c"), userId: "v", userKey: "u:v", step: 500 };
   assert.equal(consumeSuccess(d, { ...cv, confirm: { rowId: "tf2", secret: "enc-other" } }, "oidc", now), "changed");
   assert.equal(lastTotpStep(d, "v"), -1);
+  // The flag cannot be set (no user row): everything rolls back, the row is not left confirmed.
+  assert.equal(consumeSuccess(d, { ...cv, confirm: { rowId: "tf2", secret: "enc-new" } }, "oidc", now), "gone");
+  assert.equal(d.prepare(`SELECT "verified" v FROM "twoFactor" WHERE "id" = 'tf2'`).get().v, 0);
+  assert.equal(lastTotpStep(d, "v"), -1);
+  assert.ok(d.prepare(`SELECT 1 FROM "session" WHERE "id" = 'c'`).get());
+  d.prepare(`INSERT INTO "user" VALUES ('v', 0)`).run();
   assert.equal(consumeSuccess(d, { ...cv, confirm: { rowId: "tf2", secret: "enc-new" } }, "oidc", now), "ok");
   assert.equal(d.prepare(`SELECT "verified" v FROM "twoFactor" WHERE "id" = 'tf2'`).get().v, 1);
+  assert.equal(d.prepare(`SELECT "twoFactorEnabled" f FROM "user" WHERE "id" = 'v'`).get().f, 1);
 });
 
 test("revokeSession removes the session row and its state at once", () => {
@@ -293,4 +302,37 @@ test("safeNext: a path on this site, nothing else", () => {
   assert.equal(safeNext("/"), "/");
   for (const bad of [undefined, null, 5, "", "https://evil.example", "//evil.example", "/\\evil.example", "javascript:alert(1)", "/a\nb", "/2fa?next=/", "/api/auth/sign-out", "x".repeat(10)])
     assert.equal(safeNext(bad), "/", String(bad));
+});
+
+test("inheritedState: same user only, verified/exempt only", () => {
+  assert.equal(inheritedState({ userId: "a", state: "verified" }, "a"), "verified");
+  assert.equal(inheritedState({ userId: "a", state: "exempt" }, "a"), "exempt");
+  assert.equal(inheritedState({ userId: "a", state: "verified" }, "b"), null, "A's verified session never verifies B");
+  assert.equal(inheritedState({ userId: "a", state: "pending" }, "a"), null);
+  assert.equal(inheritedState({ userId: "a", state: null }, "a"), null);
+  assert.equal(inheritedState(undefined, "a"), null);
+});
+
+test("beginAttempt while locked: TOTP refused, backup codes on their own counter (5 per hour), session cap still applies", () => {
+  const d = db();
+  const now = 9_000_000;
+  for (let s = 0; s < 2; s++) for (let i = 0; i < 5; i++) beginAttempt(d, "u:x", `s:${s}`, now);
+  assert.equal(beginAttempt(d, "u:x", "s:9", now).reason, "locked");
+  assert.equal(MAX_BACKUP_WHILE_LOCKED, 5);
+  assert.equal(BACKUP_WINDOW_MS, 3600_000);
+  const userBefore = d.prepare("SELECT failures, locked_until FROM second_factor_failures WHERE key = 'u:x'").get();
+  for (let i = 0; i < 5; i++) assert.equal(beginAttempt(d, "u:x", `s:b${i}`, now, { backupCode: true }).ok, true, `backup ${i}`);
+  const sixth = beginAttempt(d, "u:x", "s:b6", now, { backupCode: true });
+  assert.deepEqual([sixth.ok, sixth.reason], [false, "locked"]);
+  assert.deepEqual(d.prepare("SELECT failures, locked_until FROM second_factor_failures WHERE key = 'u:x'").get(), userBefore, "the lock itself is untouched");
+  assert.equal(beginAttempt(d, "u:x", "s:b7", now + BACKUP_WINDOW_MS, { backupCode: true }).ok, true, "a new hour, new backup attempts");
+  // The session cap applies to backup attempts too.
+  for (let i = 0; i < 4; i++) beginAttempt(d, "u:y", "s:same", now);
+  d.prepare("UPDATE second_factor_failures SET locked_until = ? WHERE key = 'u:y'").run(now + 1000);
+  assert.equal(beginAttempt(d, "u:y", "s:same", now, { backupCode: true }).ok, true);
+  assert.equal(beginAttempt(d, "u:y", "s:same", now, { backupCode: true }).reason, "revoked");
+  // Not locked: a backup attempt counts for the user like any other.
+  beginAttempt(d, "u:z", "s:z", now, { backupCode: true });
+  assert.equal(d.prepare("SELECT failures FROM second_factor_failures WHERE key = 'u:z'").get().failures, 1);
+  assert.equal(d.prepare("SELECT 1 FROM second_factor_failures WHERE key = ?").get(backupKeyOf("u:z")), undefined);
 });

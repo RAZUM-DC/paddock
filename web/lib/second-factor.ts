@@ -17,7 +17,7 @@ import { symmetricDecrypt, symmetricEncrypt } from "better-auth/crypto";
 import {
   allowedWhilePending, beginAttempt, classifyNewSession, cleanupSecondFactor, consumeSuccess, hasOidcAccount, isPending, lastTotpStep, matchBackupCode,
   matchTotp, MAX_SESSION_FAILURES, newBackupCodes, newTotpSecret, randomString, revokeSession, sessionState, setSessionState,
-  setupSecondFactorTables, storeEnrolment, totpKey, totpUri, forgetSession, HARD_LOCKED, type SessionState,
+  setupSecondFactorTables, storeEnrolment, inheritedState, totpKey, totpUri, forgetSession, HARD_LOCKED, type SessionState,
 } from "./second-factor-core";
 
 type TwoFactorRow = { id: string; secret: string; backupCodes: string; userId: string; verified?: boolean | number | null };
@@ -72,11 +72,10 @@ export function secondFactorPlugin(db: Database.Database, providerId: string) {
     const { session, user } = found;
     if (ctx.headers) requestSessions.set(ctx.headers, { userId: user.id, state: sessionState(db, session.id, user.id, providerId) });
     if (isPending(db, session.id, user.id, providerId) && !allowedWhilePending(ctx.path)) throw refuse("FORBIDDEN", "SECOND_FACTOR_REQUIRED", "Second factor required");
-    // For any session: the SSO account cannot be unlinked (otherwise unlink, then disable) and TOTP cannot be disabled
-    // while the user has an SSO account.
-    const body = ctx.body as { providerId?: unknown } | undefined;
-    if (ctx.path === "/unlink-account" && body?.providerId === providerId)
-      throw refuse("FORBIDDEN", "SSO_ACCOUNT_REQUIRED", "The single sign-on account cannot be unlinked while two-factor authentication is required for it");
+    // For any session of a user with an SSO account: no unlinking of accounts at all (better-auth's /unlink-account takes
+    // only an accountId, so the SSO account cannot be singled out from the body) and no disabling of TOTP.
+    if (ctx.path === "/unlink-account" && hasOidcAccount(db, user.id, providerId))
+      throw refuse("FORBIDDEN", "SSO_ACCOUNT_REQUIRED", "Accounts of single sign-on users cannot be unlinked while two-factor authentication is required for them");
     if (ctx.path === "/two-factor/disable" && hasOidcAccount(db, user.id, providerId))
       throw refuse("FORBIDDEN", "TOTP_REQUIRED_FOR_SSO", "Two-factor authentication is required for single sign-on users and cannot be disabled");
   });
@@ -111,8 +110,12 @@ export function secondFactorPlugin(db: Database.Database, providerId: string) {
     if (!isPending(db, session.id, user.id, providerId)) throw refuse("BAD_REQUEST", "NOT_PENDING", "No second factor is pending for this session");
     const userKey = `u:${user.id}`;
     const sessionKey = `s:${session.id}`;
-    // Counted before anything is awaited (see beginAttempt): concurrent guesses cannot exceed the limits.
-    const attempt = beginAttempt(db, userKey, sessionKey);
+    const raw = (ctx.body as { code?: unknown } | undefined)?.code;
+    const code = typeof raw === "string" ? raw.replace(/\s+/g, "").slice(0, 64) : "";
+    const totpFormat = /^\d{6}$/.test(code);
+    // Counted before anything is awaited (see beginAttempt): concurrent guesses cannot exceed the limits. A locked user
+    // may still try backup codes (own counter).
+    const attempt = beginAttempt(db, userKey, sessionKey, Date.now(), { backupCode: !totpFormat && code.length > 0 });
     if (!attempt.ok && attempt.reason === "locked") throw (attempt.until === HARD_LOCKED ? refuse("TOO_MANY_REQUESTS", "LOCKED_HARD", "Locked; ask an admin") : refuse("TOO_MANY_REQUESTS", "LOCKED", "Too many wrong codes; try again later"));
     if (!attempt.ok) {
       revokeSession(db, session.id);
@@ -123,12 +126,9 @@ export function secondFactorPlugin(db: Database.Database, providerId: string) {
     const row = await twoFactorRow(ctx, user.id);
     if (!row) throw refuse("BAD_REQUEST", "NOT_ENROLLED", "Set up an authenticator app first");
     const confirming = !enrolled(row);
-    const raw = (ctx.body as { code?: unknown } | undefined)?.code;
-    const code = typeof raw === "string" ? raw.replace(/\s+/g, "").slice(0, 64) : "";
-
     let step: number | null = null;
     let backup: { rowId: string; before: string; after: string } | null = null;
-    if (/^\d{6}$/.test(code)) {
+    if (totpFormat) {
       step = matchTotp(totpKey(await decrypt(ctx, row.secret)), code, Date.now(), { lastStep: lastTotpStep(db, user.id) });
     } else if (!confirming && code) {
       const codes = JSON.parse(await decrypt(ctx, row.backupCodes)) as string[];
@@ -162,7 +162,8 @@ export function secondFactorPlugin(db: Database.Database, providerId: string) {
     let backupCodes: string[] | undefined;
     let current = user;
     if (confirming) {
-      current = (await ctx.context.internalAdapter.updateUser(user.id, { twoFactorEnabled: true })) ?? user;
+      // twoFactorEnabled was set inside consumeSuccess, with the row.
+      current = { ...user, twoFactorEnabled: true };
       backupCodes = JSON.parse(await decrypt(ctx, row.backupCodes));
     }
     // The pending session is already deleted (consumeSuccess); a new one (new token) replaces it.
@@ -193,7 +194,7 @@ export function secondFactorSessionHooks(db: Database.Database, providerId: stri
           // A session rotated by another endpoint keeps the state of the one the request came with (same user only);
           // the gate made sure that one was not pending.
           const prev = c?.headers ? requestSessions.get(c.headers) : undefined;
-          if (state === null && prev && prev.userId === session.userId && (prev.state === "verified" || prev.state === "exempt")) state = prev.state;
+          if (state === null) state = inheritedState(prev, session.userId);
           // Never overwrite: /second-factor/verify sets "verified" itself.
           if (state) db.prepare("INSERT OR IGNORE INTO session_second_factor (session_id, user_id, state, updated_at) VALUES (?, ?, ?, ?)").run(session.id, session.userId, state, Date.now());
         },

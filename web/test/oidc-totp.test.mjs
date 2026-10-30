@@ -409,13 +409,22 @@ test("legacy twoFactor rows with verified NULL count as set up: enrol refuses an
   assert.deepEqual([v.status, v.json], [200, { ok: true }]);
 });
 
-test("the SSO account cannot be unlinked, even from a verified session", async () => {
+test("an SSO user cannot unlink any account (better-auth takes only accountId), so TOTP stays required", async () => {
+  const ctx = await A.auth.$context;
+  const u = await ctx.internalAdapter.createUser({ email: "unlink@corp.example", name: "unlink", emailVerified: true });
+  await ctx.internalAdapter.linkAccount({ userId: u.id, providerId: "credential", accountId: u.id, password: await ctx.password.hash("unlink-password-1") });
   const jar = await oidcLogin(A, idp, { sub: "c-6", email: "unlink@corp.example" });
-  const { userId } = await enrolAndVerify(jar);
-  const acc = A.db.prepare(`SELECT "id", "accountId" FROM "account" WHERE "userId" = ? AND "providerId" = 'oidc'`).get(userId);
-  const r = await authFetch("/unlink-account", { jar, method: "POST", body: { providerId: "oidc", accountId: acc.accountId } });
-  assert.deepEqual([r.status, r.json.code], [403, "SSO_ACCOUNT_REQUIRED"]);
+  await enrolAndVerify(jar);
+  const acc = A.db.prepare(`SELECT "id", "accountId" FROM "account" WHERE "userId" = ? AND "providerId" = 'oidc'`).get(u.id);
+  // The real better-auth 1.7 body is { accountId } (providerId is ignored by it); both forms are refused.
+  for (const body of [{ accountId: acc.id }, { accountId: acc.accountId }, { providerId: "oidc", accountId: acc.accountId }]) {
+    const r = await authFetch("/unlink-account", { jar, method: "POST", body });
+    assert.deepEqual([r.status, r.json.code], [403, "SSO_ACCOUNT_REQUIRED"], JSON.stringify(body));
+  }
   assert.ok(A.db.prepare(`SELECT 1 FROM "account" WHERE "id" = ?`).get(acc.id));
+  const dis = await authFetch("/two-factor/disable", { jar, method: "POST", body: { password: "unlink-password-1" } });
+  assert.deepEqual([dis.status, dis.json.code], [403, "TOTP_REQUIRED_FOR_SSO"]);
+  assert.equal(userByEmail("unlink@corp.example").twoFactorEnabled, 1);
 });
 
 test("an expired pending session is no session for the second-factor endpoints either", async () => {
@@ -519,4 +528,44 @@ test("a verified or exempt session rotated by another endpoint (change-password)
   assert.notEqual(after.id, before.id, "better-auth rotated the session");
   assert.equal(A.db.prepare("SELECT state FROM session_second_factor WHERE session_id = ?").get(after.id)?.state, "verified");
   assert.ok(await A.sessionFromHeaders(headersOf(jar)), "the rotated session still works");
+});
+
+test("a verified session of user A plus an id_token sign-in of user B gives B a pending session, never A's state", async () => {
+  const jarA = await oidcLogin(A, idp, { sub: "x-a", email: "usera@corp.example" });
+  await enrolAndVerify(jarA);
+  // B exists as an SSO user (first login made the account).
+  await oidcLogin(A, idp, { sub: "x-b", email: "userb@corp.example" });
+  const r = await authFetch("/sign-in/social", { jar: jarA, method: "POST", body: { provider: "oidc", idToken: { token: idp.mint({ sub: "x-b", email: "userb@corp.example" }) } } });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  const s = sessionRow(jarA);
+  assert.equal(s.userId, userByEmail("userb@corp.example").id, "the cookie now holds B's session");
+  assert.equal(A.db.prepare("SELECT state FROM session_second_factor WHERE session_id = ?").get(s.id)?.state, "pending");
+  assert.equal(await A.sessionFromHeaders(headersOf(jarA)), null);
+});
+
+test("backup codes work during a soft or hard lock (own counter, 5 per hour) and clear it; TOTP codes stay locked", async () => {
+  const email = "lockbackup@corp.example";
+  const jar0 = await oidcLogin(A, idp, { sub: "c-13", email });
+  const { secret, verify, userId } = await enrolAndVerify(jar0);
+  const codes = verify.backupCodes;
+  const key = `u:${userId}`;
+  for (const hard of [false, true]) {
+    A.db.prepare("INSERT OR REPLACE INTO second_factor_failures (key, failures, first_at, locked_until, locks) VALUES (?, 10, ?, ?, ?)").run(key, Date.now(), hard ? Number.MAX_SAFE_INTEGER : Date.now() + 15 * 60_000, hard ? 5 : 1);
+    const jar = await oidcLogin(A, idp, { sub: "c-13", email });
+    const totp = await authFetch("/second-factor/verify", { jar, method: "POST", body: { code: codeAt(secret, 1) } });
+    assert.deepEqual([totp.status, totp.json.code], [429, hard ? "LOCKED_HARD" : "LOCKED"]);
+    const ok = await authFetch("/second-factor/verify", { jar, method: "POST", body: { code: codes.pop() } });
+    assert.equal(ok.status, 200, JSON.stringify(ok.json));
+    assert.equal(A.db.prepare("SELECT 1 FROM second_factor_failures WHERE key = ?").get(key), undefined, "the lock is cleared");
+  }
+  // Locked again: wrong backup codes run into their own limit (5 per hour), across sessions.
+  A.db.prepare("INSERT OR REPLACE INTO second_factor_failures (key, failures, first_at, locked_until, locks) VALUES (?, 10, ?, ?, 1)").run(key, Date.now(), Date.now() + 15 * 60_000);
+  const seen = [];
+  for (let s = 0; s < 2; s++) {
+    const jar = await oidcLogin(A, idp, { sub: "c-13", email });
+    for (let i = 0; i < 3; i++) seen.push((await authFetch("/second-factor/verify", { jar, method: "POST", body: { code: `wrong-${s}${i}xxx` } })).json.code);
+  }
+  assert.deepEqual(seen, ["INVALID_CODE", "INVALID_CODE", "INVALID_CODE", "INVALID_CODE", "INVALID_CODE", "LOCKED"]);
+  const jar = await oidcLogin(A, idp, { sub: "c-13", email });
+  assert.equal((await authFetch("/second-factor/verify", { jar, method: "POST", body: { code: codes.pop() } })).json.code, "LOCKED", "even a right backup code waits for the hour");
 });

@@ -71,6 +71,11 @@ export async function startMockIdp() {
   });
   await new Promise((ok) => srv.listen(0, "127.0.0.1", ok));
   idp.issuer = `http://127.0.0.1:${srv.address().port}/o`;
+  // A signed id_token as the IdP would issue it (for better-auth's /sign-in/social id_token branch).
+  idp.mint = (claims) => {
+    const now = Math.floor(Date.now() / 1000);
+    return jwt({ iss: idp.issuer, aud: "paddock", iat: now, exp: now + 300, email_verified: true, name: "Test User", groups: ["paddock-users"], ...claims });
+  };
   return idp;
 }
 

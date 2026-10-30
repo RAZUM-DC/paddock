@@ -46,6 +46,8 @@ export function setupSecondFactorTables(db: Database.Database) {
 //   request was made with, or leaves no row (= pending for OIDC users).
 export function classifyNewSession(path: string | undefined, params: Record<string, unknown> | undefined, providerId: string): SessionState | null {
   if (path === "/callback/:id" || path === "/oauth2/callback/:providerId") return params?.id === providerId || params?.providerId === providerId ? "pending" : null;
+  // /sign-in/social creates a session only on its id_token branch, i.e. an SSO sign-in without the redirect.
+  if (path === "/sign-in/social") return "pending";
   if (path === "/sign-in/email" || path === "/two-factor/verify-totp" || path === "/two-factor/verify-backup-code" || path === "/two-factor/verify-otp") return "exempt";
   return null;
 }
@@ -143,12 +145,34 @@ export type Attempt = { ok: true; session: Counted; user: Counted } | { ok: fals
 
 // Before any await: refuse when the user is locked or the session has used its attempts, otherwise count this attempt
 // for both. Synchronous (better-sqlite3), so no other request runs in between.
-export function beginAttempt(db: Database.Database, userKey: string, sessionKey: string, now = Date.now()): Attempt {
+// While the user is locked (soft or hard), TOTP codes are refused, but backup codes still work under their own
+// counter: MAX_BACKUP_WHILE_LOCKED attempts per BACKUP_WINDOW_MS per user, so the owner can recover without an admin.
+export const MAX_BACKUP_WHILE_LOCKED = 5;
+export const BACKUP_WINDOW_MS = 3600_000;
+export const backupKeyOf = (userKey: string) => `b${userKey}`;
+
+function countBackupAttempt(db: Database.Database, key: string, now: number): number {
+  const r = db.prepare("SELECT failures, first_at FROM second_factor_failures WHERE key = ?").get(key) as { failures: number; first_at: number } | undefined;
+  const fresh = !r || now - r.first_at >= BACKUP_WINDOW_MS;
+  const count = fresh ? 1 : r!.failures + 1;
+  db.prepare(`INSERT INTO second_factor_failures (key, failures, first_at, locked_until, locks) VALUES (?, ?, ?, 0, 0)
+    ON CONFLICT (key) DO UPDATE SET failures = excluded.failures, first_at = excluded.first_at`).run(key, count, fresh ? now : r!.first_at);
+  return count;
+}
+
+const NOT_COUNTED: Counted = { count: 0, lockedUntil: 0, locks: 0, newLock: false };
+
+export function beginAttempt(db: Database.Database, userKey: string, sessionKey: string, now = Date.now(), { backupCode = false } = {}): Attempt {
   return db.transaction((): Attempt => {
     const until = lockedUntil(db, userKey, now);
-    if (until) return { ok: false, reason: "locked", until };
+    if (until && !backupCode) return { ok: false, reason: "locked", until };
     const session = countAttempt(db, sessionKey, MAX_SESSION_FAILURES, now);
     if (session.count > MAX_SESSION_FAILURES) return { ok: false, reason: "revoked" };
+    if (until) {
+      // Locked, backup code: only the backup counter, the lock itself is untouched (a success clears it).
+      if (countBackupAttempt(db, backupKeyOf(userKey), now) > MAX_BACKUP_WHILE_LOCKED) return { ok: false, reason: "locked", until };
+      return { ok: true, session, user: NOT_COUNTED };
+    }
     const user = countAttempt(db, userKey, MAX_USER_FAILURES, now);
     return { ok: true, session, user };
   })();
@@ -202,11 +226,14 @@ export function consumeSuccess(db: Database.Database, c: Consume, providerId: st
       if (c.confirm) {
         const r = db.prepare(`UPDATE "twoFactor" SET "verified" = 1 WHERE "id" = ? AND "secret" = ? AND "verified" = 0`).run(c.confirm.rowId, c.confirm.secret);
         if (r.changes !== 1) throw new Abort("changed");
+        // The user's flag in the same transaction: never a confirmed row with twoFactorEnabled still false.
+        if (db.prepare(`UPDATE "user" SET "twoFactorEnabled" = 1 WHERE "id" = ?`).run(c.userId).changes !== 1) throw new Abort("gone");
       }
       if (db.prepare(`DELETE FROM "session" WHERE "id" = ?`).run(c.sessionId).changes !== 1) throw new Abort("gone");
       forgetSession(db, c.sessionId);
       resetFailures(db, c.sessionKey);
       resetFailures(db, c.userKey);
+      resetFailures(db, backupKeyOf(c.userKey));
     })();
     return "ok";
   } catch (e) {
@@ -347,4 +374,11 @@ export function secondFactorPageAction(st: { signedIn: boolean; pending: boolean
   if (!st?.signedIn) return { redirect: "/login" };
   if (!st.pending) return { redirect: next };
   return { render: true, next };
+}
+
+// A session created by another endpoint in a request that came with a verified/exempt session inherits that state,
+// but only for the SAME user: a request authenticated as A that ends up signing in B gives B nothing.
+export function inheritedState(prev: { userId: string; state: SessionState | null } | undefined, newUserId: string): SessionState | null {
+  if (!prev || prev.userId !== newUserId) return null;
+  return prev.state === "verified" || prev.state === "exempt" ? prev.state : null;
 }

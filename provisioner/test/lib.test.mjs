@@ -1,7 +1,7 @@
 // Pure provisioner logic. Run: node --test test/ (from provisioner/).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { configFromEnv, configSeed, containerCreateBody, hostPathOf, idFromPath, idOfNetwork, isValidId, missingAliases, names, networkConnectBody, networkCreateBody, wrongMac, parseEnvFile, parseMemory, readiness, tomlString, validateEnsure, volumeCreateBody } from "../lib.mjs";
+import { configFromEnv, configSeed, containerCreateBody, hostPathOf, idFromPath, idOfNetwork, isValidId, missingAliases, names, networkConnectBody, networkCreateBody, parseEnvFile, parseMemory, readiness, tomlString, validateEnsure, volumeCreateBody } from "../lib.mjs";
 
 const TOKEN = "t".repeat(32);
 const base = (extra = {}) => configFromEnv({ PROVISIONER_TOKEN: TOKEN, ...extra });
@@ -134,7 +134,6 @@ test("networkCreateBody: internal bridge, labelled", () => {
 
 test("networkConnectBody and volumeCreateBody", () => {
   assert.deepEqual(networkConnectBody("paddock-egress", ["egress"]), { Container: "paddock-egress", EndpointConfig: { Aliases: ["egress"] } });
-  assert.deepEqual(networkConnectBody("paddock-egress", ["egress"], "02:00:00:00:00:e1"), { Container: "paddock-egress", EndpointConfig: { Aliases: ["egress"], MacAddress: "02:00:00:00:00:e1" } });
   assert.deepEqual(volumeCreateBody("workspace-alice", "alice"), { Name: "workspace-alice", Labels: { "paddock.user": "alice", "paddock.managed-by": "paddock-provisioner" } });
 });
 
@@ -233,19 +232,4 @@ test("RESERVED_ENV: a per-user env file can set none of the proxy, config-home, 
   const { vars, skipped } = parseEnvFile(Object.entries(evil).map(([k, v]) => `${k}=${v}`).join("\n"));
   assert.deepEqual(Object.keys(vars), ["OK_VAR"]);
   assert.equal(skipped.length, Object.keys(evil).length - 1);
-});
-
-test("wrongMac and EGRESS_MAC", () => {
-  const c = { NetworkSettings: { Networks: { n: { MacAddress: "02:00:00:00:00:E1" }, m: { MacAddress: "02:42:0a:00:00:02" }, o: {} } } };
-  assert.equal(wrongMac(c, "n", "02:00:00:00:00:e1"), false);
-  assert.equal(wrongMac(c, "m", "02:00:00:00:00:e1"), true);
-  assert.equal(wrongMac(c, "o", "02:00:00:00:00:e1"), true);
-  assert.equal(wrongMac(c, "m", ""), false);
-  assert.equal(wrongMac(c, "absent", "02:00:00:00:00:e1"), false);
-  const base = { PROVISIONER_TOKEN: "x".repeat(20) };
-  assert.equal(configFromEnv(base).cfg.egressMac, "02:00:00:00:00:e1");
-  assert.equal(configFromEnv({ ...base, EGRESS_MAC: "02:AB:00:00:00:01" }).cfg.egressMac, "02:ab:00:00:00:01");
-  assert.equal(configFromEnv({ ...base, EGRESS_MAC: "" }).cfg.egressMac, "");
-  assert.deepEqual(configFromEnv({ ...base, EGRESS_MAC: "" }).errors, []);
-  assert.match(configFromEnv({ ...base, EGRESS_MAC: "02:00:00:00:e1" }).errors.join(), /EGRESS_MAC/);
 });

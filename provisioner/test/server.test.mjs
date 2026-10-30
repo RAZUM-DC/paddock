@@ -32,7 +32,7 @@ function fakeDocker(sock, tokensDir) {
     if (req.method === "POST" && (m = /^\/networks\/([^/]+)\/connect$/.exec(path))) {
       const n = state.networks.get(m[1]);
       if (Object.values(n.Containers).some((c) => c.Name === b.Container)) return json(403, { message: "endpoint already exists in network" });
-      n.Containers[b.Container] = { Name: b.Container, Aliases: b.EndpointConfig?.Aliases, MacAddress: b.EndpointConfig?.MacAddress ?? "02:42:0a:00:00:09" };
+      n.Containers[b.Container] = { Name: b.Container, Aliases: b.EndpointConfig?.Aliases };
       return json(200);
     }
     if (req.method === "POST" && (m = /^\/networks\/([^/]+)\/disconnect$/.exec(path))) {
@@ -48,7 +48,7 @@ function fakeDocker(sock, tokensDir) {
       if (m[1] === "paddock-provisioner") return json(200, { Mounts: [{ Type: "bind", Destination: tokensDir, Source: "/host/secrets/tokens" }] });
       if (m[1] === "paddock-web" || m[1] === "paddock-egress") {
         const nets = {};
-        for (const [name, n] of state.networks) if (n.Containers[m[1]]) nets[name] = { Aliases: n.Containers[m[1]].Aliases ?? null, MacAddress: n.Containers[m[1]].MacAddress };
+        for (const [name, n] of state.networks) if (n.Containers[m[1]]) nets[name] = { Aliases: n.Containers[m[1]].Aliases ?? null };
         return json(200, { Name: `/${m[1]}`, NetworkSettings: { Networks: nets } });
       }
       return state.containers.has(m[1]) ? json(200, state.containers.get(m[1])) : json(404, { message: "no such container" });
@@ -238,7 +238,7 @@ test("web already on a user network without its alias is reconnected with it", a
   try {
     // A network from before the alias existed: web and egress attached without aliases.
     p.state.networks.set("paddock-u-u-a1ce00000001", { Name: "paddock-u-u-a1ce00000001", Internal: true, Labels: { "paddock.user": "u-a1ce00000001", "paddock.managed-by": "paddock-provisioner" },
-      Containers: { "paddock-web": { Name: "paddock-web", Aliases: [] }, "paddock-egress": { Name: "paddock-egress", Aliases: ["egress"], MacAddress: "02:00:00:00:00:e1" } } });
+      Containers: { "paddock-web": { Name: "paddock-web", Aliases: [] }, "paddock-egress": { Name: "paddock-egress", Aliases: ["egress"] } } });
     await p.call("POST", "/harness/ensure", { id: "u-a1ce00000001" });
     await waitReady(p.call, "u-a1ce00000001");
     const net = p.state.networks.get("paddock-u-u-a1ce00000001");
@@ -251,34 +251,6 @@ test("web already on a user network without its alias is reconnected with it", a
     await new Promise((r) => setTimeout(r, 300));
     assert.ok(!p.state.calls.slice(before).some((c) => /disconnect|connect$/.test(c)));
   } finally { p.stop(); }
-});
-
-test("egress gets the fixed EGRESS_MAC on user networks (web does not); an older attachment is reconnected once", async () => {
-  const p = await start();
-  try {
-    const U = "u-0000000000ab";
-    p.state.networks.set(`paddock-u-${U}`, { Name: `paddock-u-${U}`, Internal: true, Options: { "com.docker.network.bridge.name": "pu0000000000ab" }, Labels: { "paddock.user": U, "paddock.managed-by": "paddock-provisioner" },
-      Containers: { "paddock-egress": { Name: "paddock-egress", Aliases: ["egress"], MacAddress: "02:42:0a:00:00:07" } } });
-    await p.call("POST", "/harness/ensure", { id: U });
-    await waitReady(p.call, U);
-    const net = p.state.networks.get(`paddock-u-${U}`);
-    assert.equal(net.Containers["paddock-egress"].MacAddress, "02:00:00:00:00:e1");
-    assert.deepEqual(net.Containers["paddock-egress"].Aliases, ["egress"]);
-    assert.equal(net.Containers["paddock-web"].MacAddress, "02:42:0a:00:00:09", "web keeps Docker's MAC");
-    assert.equal(p.state.calls.filter((c) => c === `POST /networks/paddock-u-${U}/disconnect`).length, 1);
-    assert.match(p.out(), /paddock-egress reconnecting to paddock-u-u-0000000000ab for MAC 02:00:00:00:00:e1/);
-    const before = p.state.calls.length;
-    await p.call("POST", "/harness/ensure", { id: U });
-    await new Promise((r) => setTimeout(r, 300));
-    assert.ok(!p.state.calls.slice(before).some((c) => /disconnect|connect$/.test(c)));
-  } finally { p.stop(); }
-  // EGRESS_MAC="" leaves Docker's MAC alone.
-  const q = await start({ EGRESS_MAC: "" });
-  try {
-    await q.call("POST", "/harness/ensure", { id: "u-0000000000ac" });
-    await waitReady(q.call, "u-0000000000ac");
-    assert.equal(q.state.networks.get("paddock-u-u-0000000000ac").Containers["paddock-egress"].MacAddress, "02:42:0a:00:00:09");
-  } finally { q.stop(); }
 });
 
 test("a removed container is recreated on the next ensure, with the same token", async () => {

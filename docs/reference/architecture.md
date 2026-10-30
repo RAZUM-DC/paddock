@@ -68,6 +68,7 @@ browser ──HTTPS/WS──▶ edge(nginx) ──▶ web(Next.js, WS bridge) �
 | harness ↔ LAN/host/docker0 | egress refuses private networks | curl to 192.168.x or the host is refused |
 | user ↔ user | own container, own volumes, own capability token; with the provisioner also an own internal network `paddock-u-<id>` | ⬜ add-user.sh harnesses share `core` (roadmap 3.9); provisioned ones: see below, not yet verified on a live Docker |
 | web UI login | password 12+ chars and 2FA (TOTP: Authy etc.), rate limit per client IP (X-Forwarded-For from Traefik/edge, only private networks are trusted) | `tests/two-factor.mjs` |
+| web UI login via SSO | with OIDC, Paddock's own TOTP is required after the SSO login (`OIDC_REQUIRE_TOTP`, default on): the session is "pending" and refused by every session check, incl. the WS bridge, until `/2fa` succeeds; then the session token is replaced | `web/test/oidc-totp.test.mjs` (mock IdP) |
 | browser ↔ harness | only the web UI holds the token; the WS bridge checks the cookie session and Origin | 401 without cookie, 403 from a foreign Origin |
 | web UI ↔ egress API | gost API only on `core` and behind a password known to the web UI | 401 from a harness |
 | harness → web (`/api/harness/*`) | git credentials and secret requests: the caller is identified by its own capability token and sees only its own user's data; refused when the request carries `X-Forwarded-For`/`Forwarded`/`X-Real-IP` (came through edge or another proxy), and edge returns 404 for the prefix | `web/test/harness-api.test.mjs`; not yet on a live Docker |

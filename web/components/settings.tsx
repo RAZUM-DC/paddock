@@ -5,6 +5,7 @@ import { authClient } from "@/lib/auth-client";
 import { maskEmail, type AccountInfo } from "./account";
 import { Icon } from "./icons";
 import { ToolsTab } from "./tools";
+import { GitTab } from "./git-settings";
 import type { Model } from "./model-picker";
 import { t } from "@/lib/i18n";
 
@@ -25,7 +26,7 @@ export function Settings({ email, account, models, ndModels, reloadNeuralDeep, r
   loginEvent: LoginEvent | null;
   onClose: () => void;
 }) {
-  const [tab, setTab] = useState<"account" | "neuraldeep" | "tools" | "codex" | "proxy" | "web">("account");
+  const [tab, setTab] = useState<"account" | "neuraldeep" | "tools" | "git" | "codex" | "proxy" | "web">("account");
 
   useEffect(() => {
     const esc = (e: KeyboardEvent) => e.key === "Escape" && onClose();
@@ -37,6 +38,7 @@ export function Settings({ email, account, models, ndModels, reloadNeuralDeep, r
     ["account", "ChatGPT account"],
     ["neuraldeep", "NeuralDeep"],
     ["tools", "Tools"],
+    ["git", "Git"],
     ["codex", "Codex"],
     ["proxy", "Proxies"],
     ["web", "Paddock login"],
@@ -64,6 +66,7 @@ export function Settings({ email, account, models, ndModels, reloadNeuralDeep, r
           {tab === "account" && <AccountTab account={account} request={request} loginEvent={loginEvent} />}
           {tab === "neuraldeep" && <NeuralDeepTab request={request} models={ndModels} reload={reloadNeuralDeep} />}
           {tab === "tools" && <ToolsTab request={request} />}
+          {tab === "git" && <GitTab request={request} />}
           {tab === "codex" && <CodexTab models={models} request={request} />}
           {tab === "proxy" && <ProxyTab />}
           {tab === "web" && <WebTab email={email} />}

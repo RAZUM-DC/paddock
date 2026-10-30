@@ -311,6 +311,23 @@ test("user networks get a pu<12 hex> bridge name; containers bounded logs and no
   } finally { p.stop(); }
 });
 
+test("a user network made before fixed bridge names is kept and reported once", async () => {
+  const p = await start();
+  try {
+    const U = "u-0000000000cc";
+    p.state.networks.set(`paddock-u-${U}`, { Name: `paddock-u-${U}`, Options: {}, Labels: { "paddock.user": U, "paddock.managed-by": "paddock-provisioner" }, Containers: {} });
+    await p.call("POST", "/harness/ensure", { id: U });
+    await waitReady(p.call, U);
+    await p.call("POST", "/harness/ensure", { id: U });
+    assert.equal(p.state.calls.filter((c) => c === "POST /networks/create").length, 0);
+    assert.equal(p.out().match(new RegExp(`WARNING network paddock-u-${U} is not on bridge pu0000000000cc`, "g"))?.length, 1);
+    const V = "u-0000000000dd";
+    await p.call("POST", "/harness/ensure", { id: V });
+    await waitReady(p.call, V);
+    assert.doesNotMatch(p.out(), new RegExp(`${V}: WARNING`));
+  } finally { p.stop(); }
+});
+
 test("MAX_HARNESSES: a new harness beyond the cap is refused (409), existing ones are still ensured", async () => {
   const p = await start({ MAX_HARNESSES: "2" });
   try {

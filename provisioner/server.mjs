@@ -21,6 +21,7 @@ if (errors.length) {
 }
 const docker = dockerClient(cfg.dockerSocket, { version: cfg.dockerApiVersion });
 const log = (...a) => console.log(new Date().toISOString(), ...a);
+const warnedBridge = new Set();
 
 // Harness containers bind the token file from the host: the daemon resolves bind sources on the host, not here.
 async function resolveHostTokensDir() {
@@ -55,9 +56,14 @@ function userEnv(id) {
 
 async function ensureNetwork(id) {
   const n = names(id);
-  if (!(await docker.inspect(`/networks/${n.network}`))) {
+  const net = await docker.inspect(`/networks/${n.network}`);
+  if (!net) {
     await docker.post("/networks/create", networkCreateBody(id)).catch((e) => (e.status === 409 ? null : Promise.reject(e)));
     log(`${id}: network ${n.network} created`);
+  } else if (net.Options?.["com.docker.network.bridge.name"] !== n.bridge && !warnedBridge.has(id)) {
+    // Made before fixed bridge names: host firewall rules on pu* do not see it. Recreating it is a manual step.
+    warnedBridge.add(id);
+    log(`${id}: WARNING network ${n.network} is not on bridge ${n.bridge}; host firewall rules for pu* do not apply to it (recreate it: docs/services/provisioner/README.md)`);
   }
   await attachShared(id);
 }

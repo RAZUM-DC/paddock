@@ -4,7 +4,7 @@ title: provisioner — harness on demand, one network per user
 description: "Optional service: creates harness-<id> with its own internal network, volumes and token when a user first connects; the only container with the Docker socket."
 service: provisioner
 status: active
-updated: 2026-10-29
+updated: 2026-10-30
 links:
   documents: [../../../provisioner, ../../../docker-compose.provisioner.yml, ../../../codex/entrypoint.sh]
   relates_to: [../../reference/architecture.md, ../harness/README.md, ../web/README.md]
@@ -19,7 +19,8 @@ admin: the web UI asks the provisioner, shows "preparing your workspace", and co
 ## What `POST /harness/ensure {id}` does (idempotent)
 
 1. Token `${TOKENS_DIR}/<id>.token`: 32 random bytes, hex, mode 644 (like `add-user.sh`); an existing one is kept.
-2. Network `paddock-u-<id>`: bridge, `internal: true`, labels `paddock.user=<id>`. `paddock-web` and `paddock-egress`
+2. Network `paddock-u-<id>`: bridge, `internal: true`, labels `paddock.user=<id>`, Linux bridge name
+   `pu<12 hex>` (the id without `u-`), so host firewall rules can match every user network as `pu*`. `paddock-web` and `paddock-egress`
    (`WEB_CONTAINER`, `EGRESS_CONTAINER`) are connected to it; egress gets the alias `egress` there, so the harness's
    `HTTPS_PROXY=http://egress:8080` works unchanged, and web gets the alias `web` (`WEB_ALIAS`), so the git credential
    helper and the `secrets` tool reach `http://web:3000` as on `core`. A container that is already on the network
@@ -28,14 +29,23 @@ admin: the web UI asks the provisioner, shows "preparing your workspace", and co
    container name always resolves); a per-user env file cannot override it.
 3. Volumes `harness-home-<id>`, `workspace-<id>`.
 4. Container `harness-<id>` from `HARNESS_IMAGE`: the same command, env, `cap_drop: ALL`, `no-new-privileges`, restart
-   `unless-stopped` as `users/_template.yml`; limits `HARNESS_MEMORY` / `HARNESS_CPUS` / `HARNESS_PIDS_LIMIT`
-   (defaults 4g / 2 / 1024); attached **only** to `paddock-u-<id>` with the DNS alias `harness-<id>`.
+   `unless-stopped` as `users/_template.yml`; limits `HARNESS_MEMORY` (swap: none beyond it) / `HARNESS_CPUS` /
+   `HARNESS_PIDS_LIMIT` (defaults 4g / 2 / 512), json-file logs capped at 3 × 10 MB; attached **only** to
+   `paddock-u-<id>` with the DNS alias `harness-<id>`. With `MAX_HARNESSES=N`, a new harness beyond N managed
+   containers is refused with 409 (existing ones are still ensured; creates are serialised, so the cap holds under
+   concurrent logins).
 
 Every `RECONCILE_INTERVAL_MS` (default 60 s, `0` = off) it re-attaches web and egress to every network it made:
 `docker compose up` recreates them and they lose the networks that were attached at runtime.
 
 `GET /harness/<id>` answers `{"ready": true}` once the container is running and its token exists.
-Ids are checked strictly: `^u-[0-9a-f]{12}$` (OIDC users) or `^[a-z0-9-]{1,32}$` (legacy names).
+Ids are checked strictly: only `^u-[0-9a-f]{12}$` (SSO users). Legacy names (`add-user.sh` harnesses on `core`) are
+refused with 400 before Docker is touched, and web never asks for them (their state is `unmanaged`).
+
+**Networks made before fixed bridge names** (Docker named them `br-<hex>`) are kept as they are and logged once with
+`WARNING … is not on bridge pu…`; the host firewall's `pu*` rules do not see them. To move one (volumes stay):
+`docker rm -f harness-<id> && docker network rm paddock-u-<id>` (disconnect web/egress first if Docker refuses:
+`docker network disconnect -f paddock-u-<id> paddock-web`, same for `paddock-egress`); the next login recreates both.
 
 ## Per-user env and a default LLM provider
 
@@ -66,7 +76,9 @@ only when `config.toml` does not exist yet; later edits (Settings → Codex) are
 | `WEB_CONTAINER` / `EGRESS_CONTAINER` | `paddock-web` / `paddock-egress` | |
 | `WEB_ALIAS` | `web` | web's name on user networks |
 | `WEB_PORT` | `3000` | web's port, for the harness's `PADDOCK_WEB_URL` |
-| `HARNESS_MEMORY` / `HARNESS_CPUS` / `HARNESS_PIDS_LIMIT` | `4g` / `2` / `1024` | |
+| `HARNESS_MEMORY` / `HARNESS_CPUS` / `HARNESS_PIDS_LIMIT` | `4g` / `2` / `512` | swap is set equal to memory (no swap) |
+| `MAX_HARNESSES` | `0` (no cap) | cap on managed harness containers; a new one beyond it gets 409 |
+| `DOCKER_API_VERSION` | `v1.44` | Engine API version in request paths (`v1.NN`); 1.44 = Engine 25+, works on newer engines |
 | `USER_ENV_DIR` | — | per-user env files |
 | `RECONCILE_INTERVAL_MS` | `60000` | re-attach web/egress to user networks; `0` = off |
 | `LLM_*`, `MCP_SERVERS_JSON` | — | see above |

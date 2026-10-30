@@ -27,6 +27,12 @@ export type HarnessApiDeps = {
   // Per harness, per minute.
   gitRate?: number;
   secretsRate?: number;
+  // Per client address, per minute, checked before the token: all requests, and failed authentications.
+  addressRate?: number;
+  authFailRate?: number;
+  // A body that does not arrive in full within this time is answered 408.
+  bodyTimeoutMs?: number;
+  tokenCacheMs?: number;
 };
 
 export const isHarnessApiPath = (url: string | undefined) => !!url && url.startsWith(HARNESS_PREFIX);
@@ -35,6 +41,8 @@ export const isHarnessApiPath = (url: string | undefined) => !!url && url.starts
 export const viaProxy = (h: IncomingMessage["headers"]) => h["x-forwarded-for"] !== undefined || h["forwarded"] !== undefined || h["x-real-ip"] !== undefined;
 
 function send(res: ServerResponse, status: number, body?: unknown): void {
+  // The rest of an unread body (too large, too slow) is not waited for.
+  if (status === 408 || status === 413) res.setHeader("connection", "close");
   if (body === undefined) {
     res.writeHead(status, { "cache-control": "no-store" });
     res.end();
@@ -45,9 +53,11 @@ function send(res: ServerResponse, status: number, body?: unknown): void {
   res.end(data);
 }
 
-function readJson(req: IncomingMessage): Promise<unknown> {
+function readJson(req: IncomingMessage, timeoutMs: number): Promise<unknown> {
   return new Promise((resolve, reject) => {
     if (Number(req.headers["content-length"] ?? 0) > MAX_BODY) return reject(new SecretRequestError("body too large", 413));
+    const timer = setTimeout(() => reject(new SecretRequestError("body not received in time", 408)), timeoutMs);
+    req.on("close", () => clearTimeout(timer));
     let size = 0;
     let tooLarge = false;
     const chunks: Buffer[] = [];
@@ -58,6 +68,7 @@ function readJson(req: IncomingMessage): Promise<unknown> {
       else chunks.push(c);
     });
     req.on("end", () => {
+      clearTimeout(timer);
       if (tooLarge) return reject(new SecretRequestError("body too large", 413));
       try {
         resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {});
@@ -74,18 +85,28 @@ export function createHarnessApi(deps: HarnessApiDeps) {
   const log = deps.log ?? ((l) => console.log(JSON.stringify(l)));
   const gitLimit = rateLimiter(deps.gitRate ?? 120, 60_000, now);
   const secretsLimit = rateLimiter(deps.secretsRate ?? 120, 60_000, now);
+  const addressLimit = rateLimiter(deps.addressRate ?? 600, 60_000, now);
+  const authFailures = rateLimiter(deps.authFailRate ?? 30, 60_000, now);
+  const bodyTimeout = deps.bodyTimeoutMs ?? 10_000;
+  const readBody = (req: IncomingMessage) => readJson(req, bodyTimeout);
 
   return async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     if (viaProxy(req.headers) || !deps.enabled) return send(res, 404, { error: "not found" });
     const path = new URL(req.url ?? "/", "http://harness").pathname;
-    const harness = harnessIdForToken(deps.tokensDir, bearerOf(req.headers.authorization));
-    if (!harness) return send(res, 401, { error: "unauthorized" });
+    // Before the token is looked at: per address, all requests and failed authentications.
+    const addr = req.socket.remoteAddress ?? "";
+    if (!addressLimit(addr) || authFailures.blocked(addr)) return send(res, 429, { error: "too many requests" });
+    const harness = harnessIdForToken(deps.tokensDir, bearerOf(req.headers.authorization), { now: now(), ttlMs: deps.tokenCacheMs ?? 5_000 });
+    if (!harness) {
+      authFailures(addr);
+      return send(res, 401, { error: "unauthorized" });
+    }
 
     try {
       if (path === "/api/harness/git-credential") {
         if (req.method !== "POST") return send(res, 405, { error: "method not allowed" });
         if (!gitLimit(harness)) return send(res, 429, { error: "too many requests" });
-        const b = (await readJson(req)) as Record<string, unknown>;
+        const b = (await readBody(req)) as Record<string, unknown>;
         const q = { protocol: typeof b?.protocol === "string" ? b.protocol : undefined, host: typeof b?.host === "string" ? b.host : undefined, path: typeof b?.path === "string" ? b.path : undefined };
         const userId = userIdOfHarness(deps.db, harness);
         const cred = userId ? deps.gitAccounts().credentialFor(userId, q) : null;
@@ -98,7 +119,7 @@ export function createHarnessApi(deps: HarnessApiDeps) {
         if (!secretsLimit(harness)) return send(res, 429, { error: "too many requests" });
         const id = path.slice("/api/harness/secret-requests/".length);
         if (path === "/api/harness/secret-requests") {
-          if (req.method === "POST") return send(res, 201, { request: deps.secrets.create(harness, await readJson(req), now()) });
+          if (req.method === "POST") return send(res, 201, { request: deps.secrets.create(harness, await readBody(req), now()) });
           if (req.method === "GET") return send(res, 200, { requests: deps.secrets.pending(harness, now()) });
           return send(res, 405, { error: "method not allowed" });
         }

@@ -144,6 +144,65 @@ test("rate limit per harness", async () => {
   }
 });
 
+async function withServer(extra, fn) {
+  const s = await boot(extra);
+  const old = url;
+  url = `http://127.0.0.1:${s.address().port}`;
+  try {
+    await fn();
+  } finally {
+    url = old;
+    s.close();
+  }
+}
+
+test("secret requests are rate limited per harness", () =>
+  withServer({ secretsRate: 2 }, async () => {
+    const codes = [];
+    for (let i = 0; i < 3; i++) codes.push((await call("GET", "/api/harness/secret-requests", { token: TOK_ALICE })).status);
+    codes.push((await call("GET", "/api/harness/secret-requests", { token: TOK_BOB })).status);
+    assert.deepEqual(codes, [200, 200, 429, 200]);
+  }));
+
+test("per address: all requests and failed authentications are limited before the token is looked at", async () => {
+  await withServer({ addressRate: 3 }, async () => {
+    const codes = [];
+    for (let i = 0; i < 4; i++) codes.push((await call("GET", "/api/harness/secret-requests", { token: TOK_ALICE })).status);
+    assert.deepEqual(codes, [200, 200, 200, 429]);
+  });
+  await withServer({ authFailRate: 2 }, async () => {
+    const codes = [];
+    for (let i = 0; i < 3; i++) codes.push((await call("GET", "/api/harness/secret-requests", { token: "x".repeat(64) })).status);
+    // Even a valid token from that address waits for the window.
+    codes.push((await call("GET", "/api/harness/secret-requests", { token: TOK_ALICE })).status);
+    assert.deepEqual(codes, [401, 401, 429, 429]);
+  });
+});
+
+// A raw request: chunked (no Content-Length), body written in pieces, optionally never finished.
+function rawChunked(path, token, pieces, finish) {
+  return new Promise((ok, fail) => {
+    const r = request(url + path, { method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json", "transfer-encoding": "chunked" } }, (res) => {
+      let text = "";
+      res.on("data", (d) => (text += d));
+      res.on("end", () => ok({ status: res.statusCode, text }));
+    });
+    r.on("error", fail);
+    for (const p of pieces) r.write(p);
+    if (finish) r.end();
+  });
+}
+
+test("bodies: chunked over 16 KB without Content-Length → 413; a body that never ends → 408", () =>
+  withServer({ bodyTimeoutMs: 300 }, async () => {
+    const big = await rawChunked("/api/harness/secret-requests", TOK_ALICE, Array.from({ length: 5 }, () => "x".repeat(4096)), true);
+    assert.equal(big.status, 413);
+    const started = Date.now();
+    const slow = await rawChunked("/api/harness/git-credential", TOK_ALICE, ['{"protocol":'], false);
+    assert.equal(slow.status, 408);
+    assert.ok(Date.now() - started < 5000);
+  }));
+
 test("PADDOCK_HARNESS_API=0 (enabled: false) answers 404", async () => {
   const s = await boot({ enabled: false });
   const old = url;

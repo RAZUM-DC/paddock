@@ -3,7 +3,7 @@
 // Pure node:fs/crypto, unit-tested in test/harness-auth.test.mjs.
 import type Database from "better-sqlite3";
 import { createHash, timingSafeEqual } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { isValidHarnessId } from "./identity";
 
@@ -18,19 +18,30 @@ export function bearerOf(header: string | string[] | undefined | null): string |
   return m ? m[1] : null;
 }
 
-// The harness id whose token file holds this token, or null. Every file is compared (constant time on sha256
-// digests), so the answer time does not depend on where in the directory the match is.
-export function harnessIdForToken(tokensDir: string, token: string | null): string | null {
-  if (!token || token.length < MIN_TOKEN) return null;
-  const want = digest(token);
-  let found: string | null = null;
-  let entries: string[] = [];
+// sha256 of every valid token file, cached per directory: re-read when the directory changes (a harness added or
+// removed) or after ttlMs (a token rewritten in place), so callers cannot make web read every file on every request.
+type TokenIndex = { mtimeMs: number; at: number; entries: { id: string; digest: Buffer }[] };
+const indexes = new Map<string, TokenIndex>();
+export const clearTokenCache = () => indexes.clear();
+
+function tokenIndex(tokensDir: string, now: number, ttlMs: number): TokenIndex["entries"] | null {
+  let mtimeMs: number;
   try {
-    entries = readdirSync(tokensDir);
+    mtimeMs = statSync(tokensDir).mtimeMs;
+  } catch {
+    indexes.delete(tokensDir);
+    return null;
+  }
+  const cached = indexes.get(tokensDir);
+  if (cached && cached.mtimeMs === mtimeMs && now - cached.at < ttlMs) return cached.entries;
+  const entries: TokenIndex["entries"] = [];
+  let names: string[] = [];
+  try {
+    names = readdirSync(tokensDir);
   } catch {
     return null;
   }
-  for (const f of entries) {
+  for (const f of names) {
     const id = f.endsWith(".token") ? f.slice(0, -".token".length) : "";
     if (!isValidHarnessId(id)) continue;
     let have: string;
@@ -40,8 +51,19 @@ export function harnessIdForToken(tokensDir: string, token: string | null): stri
       continue;
     }
     if (have.length < MIN_TOKEN) continue;
-    if (timingSafeEqual(digest(have), want) && found === null) found = id;
+    entries.push({ id, digest: digest(have) });
   }
+  indexes.set(tokensDir, { mtimeMs, at: now, entries });
+  return entries;
+}
+
+// The harness id whose token file holds this token, or null. Every entry is compared (constant time on sha256
+// digests), so the answer time does not depend on where in the directory the match is.
+export function harnessIdForToken(tokensDir: string, token: string | null, { now = Date.now(), ttlMs = 5_000 } = {}): string | null {
+  if (!token || token.length < MIN_TOKEN) return null;
+  const want = digest(token);
+  let found: string | null = null;
+  for (const e of tokenIndex(tokensDir, now, ttlMs) ?? []) if (timingSafeEqual(e.digest, want) && found === null) found = e.id;
   return found;
 }
 
@@ -57,9 +79,10 @@ export function userIdOfHarness(db: Database.Database, harnessId: string): strin
 }
 
 // Fixed one-minute windows per key: enough to stop a runaway loop in a harness from hammering web.
+// allow(key) counts a hit and says whether it is within the limit; blocked(key) only looks.
 export function rateLimiter(max: number, windowMs = 60_000, now: () => number = Date.now) {
   const hits = new Map<string, { start: number; n: number }>();
-  return (key: string): boolean => {
+  const allow = (key: string): boolean => {
     const t = now();
     const h = hits.get(key);
     if (!h || t - h.start >= windowMs) {
@@ -70,6 +93,11 @@ export function rateLimiter(max: number, windowMs = 60_000, now: () => number = 
     h.n += 1;
     return h.n <= max;
   };
+  const blocked = (key: string): boolean => {
+    const h = hits.get(key);
+    return !!h && now() - h.start < windowMs && h.n >= max;
+  };
+  return Object.assign(allow, { blocked });
 }
 
 // An admin names a user by email or harness id (offboarding): their web user id, or null.

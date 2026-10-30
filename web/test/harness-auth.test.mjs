@@ -1,11 +1,11 @@
 // Harness callers: bearer token → harness id → web user (lib/harness-auth.ts).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { bearerOf, findUserId, harnessIdForToken, MIN_TOKEN, rateLimiter, userIdOfHarness } from "../lib/harness-auth.ts";
+import { bearerOf, clearTokenCache, findUserId, harnessIdForToken, MIN_TOKEN, rateLimiter, userIdOfHarness } from "../lib/harness-auth.ts";
 
 const hex = (c) => c.repeat(64);
 function tokensDir() {
@@ -46,7 +46,28 @@ test("harnessIdForToken: a short token file never matches, even with the same sh
     writeFileSync(join(dir, "bob.token"), "x".repeat(31));
     assert.equal(harnessIdForToken(dir, "x".repeat(31)), null);
     writeFileSync(join(dir, "bob.token"), "x".repeat(32));
-    assert.equal(harnessIdForToken(dir, "x".repeat(32)), "bob");
+    assert.equal(harnessIdForToken(dir, "x".repeat(32), { ttlMs: 0 }), "bob");
+  } finally {
+    rmSync(dir, { recursive: true });
+  }
+});
+
+test("harnessIdForToken: digests are cached; a new or removed file is seen at once, an in-place rewrite after the TTL", () => {
+  clearTokenCache();
+  const dir = mkdtempSync(join(tmpdir(), "paddock-tokens-"));
+  try {
+    writeFileSync(join(dir, "alice.token"), hex("a"));
+    assert.equal(harnessIdForToken(dir, hex("a"), { now: 0 }), "alice");
+    writeFileSync(join(dir, "bob.token"), hex("b"));
+    assert.equal(harnessIdForToken(dir, hex("b"), { now: 1 }), "bob");
+    unlinkSync(join(dir, "bob.token"));
+    assert.equal(harnessIdForToken(dir, hex("b"), { now: 2 }), null);
+    // Rewritten in place (the directory does not change): the old token works until the cache expires.
+    writeFileSync(join(dir, "alice.token"), hex("c"));
+    assert.equal(harnessIdForToken(dir, hex("a"), { now: 3, ttlMs: 5000 }), "alice");
+    assert.equal(harnessIdForToken(dir, hex("c"), { now: 3, ttlMs: 5000 }), null);
+    assert.equal(harnessIdForToken(dir, hex("a"), { now: 5003, ttlMs: 5000 }), null);
+    assert.equal(harnessIdForToken(dir, hex("c"), { now: 5004, ttlMs: 5000 }), "alice");
   } finally {
     rmSync(dir, { recursive: true });
   }
@@ -72,6 +93,20 @@ test("rateLimiter: max per window per key", () => {
   assert.equal(allow("a"), false);
   t = 60_000;
   assert.equal(allow("a"), true);
+});
+
+test("rateLimiter.blocked looks without counting", () => {
+  let t = 0;
+  const fail = rateLimiter(2, 60_000, () => t);
+  assert.equal(fail.blocked("x"), false);
+  fail("x");
+  assert.equal(fail.blocked("x"), false);
+  fail("x");
+  assert.equal(fail.blocked("x"), true);
+  assert.equal(fail.blocked("x"), true);
+  assert.equal(fail.blocked("y"), false);
+  t = 60_000;
+  assert.equal(fail.blocked("x"), false);
 });
 
 test("findUserId: by harness id or email (case-insensitive), nothing else", () => {

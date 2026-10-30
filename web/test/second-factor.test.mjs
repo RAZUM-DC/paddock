@@ -325,7 +325,10 @@ test("beginAttempt while locked: TOTP refused, backup codes on their own counter
   const sixth = beginAttempt(d, "u:x", "s:b6", now, { backupCode: true });
   assert.deepEqual([sixth.ok, sixth.reason], [false, "locked"]);
   assert.deepEqual(d.prepare("SELECT failures, locked_until FROM second_factor_failures WHERE key = 'u:x'").get(), userBefore, "the lock itself is untouched");
-  assert.equal(beginAttempt(d, "u:x", "s:b7", now + BACKUP_WINDOW_MS, { backupCode: true }).ok, true, "a new hour, new backup attempts");
+  // Still locked an hour later (a hard lock here), but a new hour brings new backup attempts.
+  d.prepare("UPDATE second_factor_failures SET locked_until = ? WHERE key = 'u:x'").run(HARD_LOCKED);
+  assert.equal(beginAttempt(d, "u:x", "s:b7", now + BACKUP_WINDOW_MS - 1, { backupCode: true }).ok, false, "same hour: still limited");
+  assert.equal(beginAttempt(d, "u:x", "s:b8", now + BACKUP_WINDOW_MS, { backupCode: true }).ok, true, "a new hour, new backup attempts");
   // The session cap applies to backup attempts too.
   for (let i = 0; i < 4; i++) beginAttempt(d, "u:y", "s:same", now);
   d.prepare("UPDATE second_factor_failures SET locked_until = ? WHERE key = 'u:y'").run(now + 1000);

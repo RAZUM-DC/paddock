@@ -275,25 +275,25 @@ test("sessions from before the feature (no state row) of an OIDC user are pendin
 
 test("linked user: password login keeps its harness, OIDC links by email, enrols, then password + TOTP sign-in works", async () => {
   const ctx = await A.auth.$context;
-  const u = await ctx.internalAdapter.createUser({ email: "evgenii@hub.local", name: "evgenii", emailVerified: true });
-  await ctx.internalAdapter.linkAccount({ userId: u.id, providerId: "credential", accountId: u.id, password: await ctx.password.hash("evgenii-password-1") });
-  // First password login on the pilot build stores harness "evgenii".
-  assert.equal(A.harnessIdOf({ id: u.id, email: "evgenii@hub.local" }), "evgenii");
+  const u = await ctx.internalAdapter.createUser({ email: "alice@hub.local", name: "alice", emailVerified: true });
+  await ctx.internalAdapter.linkAccount({ userId: u.id, providerId: "credential", accountId: u.id, password: await ctx.password.hash("alice-password-1") });
+  // First password login on the pilot build stores harness "alice".
+  assert.equal(A.harnessIdOf({ id: u.id, email: "alice@hub.local" }), "alice");
   // The admin changes the email to the directory address; SSO then links by that email.
-  A.db.prepare(`UPDATE "user" SET "email" = ? WHERE "id" = ?`).run("evgenii.erman@corp.example", u.id);
+  A.db.prepare(`UPDATE "user" SET "email" = ? WHERE "id" = ?`).run("alice.smith@corp.example", u.id);
   // Without email_verified from the IdP there is no link.
-  const unverified = await oidcLogin(A, idp, { sub: "ad-evgenii", email: "Evgenii.Erman@corp.example", email_verified: false }, { expectSession: false });
+  const unverified = await oidcLogin(A, idp, { sub: "ad-alice", email: "alice.smith@corp.example", email_verified: false }, { expectSession: false });
   assert.match(unverified.location, /error=account_not_linked/);
-  const jar = await oidcLogin(A, idp, { sub: "ad-evgenii", email: "Evgenii.Erman@corp.example" });
+  const jar = await oidcLogin(A, idp, { sub: "ad-alice", email: "alice.smith@corp.example" });
   const s = sessionRow(jar);
   assert.equal(s.userId, u.id, "linked to the existing user");
-  assert.equal(A.harnessIdOf({ id: u.id, email: "evgenii.erman@corp.example" }), "evgenii");
+  assert.equal(A.harnessIdOf({ id: u.id, email: "alice.smith@corp.example" }), "alice");
   assert.equal(await A.sessionFromHeaders(headersOf(jar)), null, "pending");
   const { secret } = await enrolAndVerify(jar);
   assert.ok(await A.sessionFromHeaders(headersOf(jar)));
   // Password sign-in of the same user now asks for better-auth's TOTP, and the secret Paddock stored works there.
   const pj = cookieJar();
-  const r1 = await authFetch("/sign-in/email", { jar: pj, method: "POST", body: { email: "evgenii.erman@corp.example", password: "evgenii-password-1" } });
+  const r1 = await authFetch("/sign-in/email", { jar: pj, method: "POST", body: { email: "alice.smith@corp.example", password: "alice-password-1" } });
   assert.equal(r1.status, 200);
   assert.equal(r1.json.twoFactorRedirect, true);
   assert.deepEqual(r1.json.twoFactorMethods, ["totp"]);

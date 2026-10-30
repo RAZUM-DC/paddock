@@ -242,9 +242,9 @@ every 10 minutes.
   - Lockout: 5 wrong codes revoke the session, 10 lock the user even for the right code, and the lock expires.
   - Sign-out removes the session and its state.
   - A session without a state row is pending for an OIDC user; a password-only user is unaffected.
-  - **The linked-user case of the rollout**: a password user `evgenii@hub.local` gets harness `evgenii`. The email is
+  - **The linked-user case of the rollout**: a password user `alice@hub.local` gets harness `alice`. The email is
     changed in the db to the directory address. An SSO login without `email_verified` is not linked
-    (`account_not_linked`); with it, it links to the same user, and the harness stays `evgenii`. The user enrols, then
+    (`account_not_linked`); with it, it links to the same user, and the harness stays `alice`. The user enrols, then
     signs in by **password + better-auth's TOTP** with the secret Paddock stored, and that session is exempt and valid.
   - A forged unsigned cookie, and client-side "verified" cookies, change nothing.
   - `test/oidc-totp-off.test.mjs`: with `OIDC_REQUIRE_TOTP=0` the OIDC session works at once, the endpoints are 404,
@@ -261,7 +261,7 @@ every 10 minutes.
 
 ## Not verified
 
-- The real IdP (lk.razum.life / django-oauth-toolkit): its discovery document, the `iss` value it puts into the
+- The real IdP (idp.example / django-oauth-toolkit): its discovery document, the `iss` value it puts into the
   authorization response (must equal the discovery `issuer` byte for byte), the `groups` claim, `email_verified`.
 - The `/2fa` page in a real browser and real authenticator apps. The QR and URI format match better-auth's, which
   Authy / Google Authenticator / 1Password read.
@@ -276,11 +276,11 @@ depend on `token_endpoint_auth_methods_supported` in discovery. The mock IdP che
 accepts both methods.
 - PKCE S256 and the nonce are sent; the id_token is verified against `jwks_uri` with the discovered `issuer`.
 - The `iss` authorization-response parameter is compared **exactly** with the discovered `issuer`
-  (`oauth2/callback.mjs`, `ISSUER_MISMATCH`). If lk's discovery says `https://lk.razum.life/o` and the response carries
-  `https://lk.razum.life/o/`, login fails with `issuer_mismatch`. Check once:
-  `curl -s https://lk.razum.life/o/.well-known/openid-configuration | jq .issuer` against the `iss` in a real
+  (`oauth2/callback.mjs`, `ISSUER_MISMATCH`). If the IdP's discovery says `https://idp.example/o` and the response carries
+  `https://idp.example/o/`, login fails with `issuer_mismatch`. Check once:
+  `curl -s https://idp.example/o/.well-known/openid-configuration | jq .issuer` against the `iss` in a real
   callback URL.
-- `OIDC_ISSUER=https://lk.razum.life/o` gives discovery at `https://lk.razum.life/o/.well-known/openid-configuration`.
+- `OIDC_ISSUER=https://idp.example/o` gives discovery at `https://idp.example/o/.well-known/openid-configuration`.
 
 **(b) Egress.** Confirmed with a probe: a logging proxy, `NODE_USE_ENV_PROXY=1`, `HTTPS_PROXY`/`HTTP_PROXY` set,
 `NO_PROXY` empty, Node 22.23. These went to the proxy as `CONNECT host:443`:
@@ -305,13 +305,13 @@ plus `egress-api,provisioner` with the override): the provisioner (`lib/provisio
     trusted list; without it the result is `account_not_linked`. Tested both ways.
   - the local user's `emailVerified` must be true (`scripts/create-user.ts` sets it);
   - the db email equals the lower-cased SSO email.
-- **Harness.** `harness_users` keeps `evgenii` after the email change and the link (tested): the user id doesn't change,
+- **Harness.** `harness_users` keeps `alice` after the email change and the link (tested): the user id doesn't change,
   and a stored harness id always wins.
-- **Precondition.** The `harness_users` row must exist **before** the email is changed, i.e. Evgenii has loaded Paddock
+- **Precondition.** The `harness_users` row must exist **before** the email is changed, i.e. Alice has loaded Paddock
   at least once with the pilot (or later) build. Without the row, the first lookup after the change would derive the
-  id from the new email. `evgenii.erman@…` is not a valid legacy name, so he would get "no harness" (403). Check
+  id from the new email. `alice.smith@…` is not a valid legacy name, so he would get "no harness" (403). Check
   `SELECT * FROM harness_users WHERE user_id = '<id>'` before the change. If it is missing, insert
-  `('<id>', 'evgenii', <now ms>)`.
+  `('<id>', 'alice', <now ms>)`.
 - **Steps.**
   1. Change the email in lower case: `UPDATE user SET email = lower('<AD email>') WHERE id = '<id>'`.
   2. Check `emailVerified = 1`.

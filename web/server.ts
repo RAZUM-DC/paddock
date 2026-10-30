@@ -5,8 +5,9 @@ import { readFileSync } from "node:fs";
 import next from "next";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
 import { db, ensureDb, harnessIdOf, sessionFromHeaders } from "./lib/auth";
-import { ensureHarness, provisioningEnabled } from "./lib/provision";
+import { ensureHarness, managedHarness } from "./lib/provision";
 import { createHarnessApi, isHarnessApiPath } from "./lib/harness-api";
+import { DEFAULT_TRUSTED_PROXIES, normalizeForwarded, parseTrustList, ProxyTrust } from "./lib/client-ip";
 import { gitAccounts, harnessApiEnabled, secretRequests } from "./lib/harness-services";
 
 const dev = process.env.NODE_ENV !== "production";
@@ -24,6 +25,13 @@ function toHeaders(h: IncomingHttpHeaders): Headers {
 }
 
 await ensureDb();
+
+// Who may pass X-Forwarded-For through (the edge); everyone else's forwarding headers are replaced by the TCP peer.
+const trustSpec = parseTrustList(process.env.TRUSTED_PROXIES ?? DEFAULT_TRUSTED_PROXIES);
+if (trustSpec.invalid.length) console.warn(`TRUSTED_PROXIES: ignored ${trustSpec.invalid.join(", ")}`);
+const proxyTrust = new ProxyTrust(trustSpec);
+await proxyTrust.refresh();
+setInterval(() => void proxyTrust.refresh(), 60_000).unref();
 const app = next({ dev });
 const handle = app.getRequestHandler();
 await app.prepare();
@@ -31,10 +39,16 @@ const nextUpgrade = app.getUpgradeHandler();
 
 // /api/harness/*: harness containers only (git credentials, secret requests), handled before Next — see lib/harness-api.ts.
 const harnessApi = createHarnessApi({ enabled: harnessApiEnabled(), tokensDir, db, gitAccounts, secrets: secretRequests() });
-const server = createServer((req, res) => (isHarnessApiPath(req.url) ? void harnessApi(req, res) : handle(req, res)));
+// /api/harness/* sees the raw headers (it refuses any forwarding header); everything else gets them normalised.
+const server = createServer((req, res) => {
+  if (isHarnessApiPath(req.url)) return void harnessApi(req, res);
+  normalizeForwarded(req.headers, req.socket.remoteAddress, proxyTrust);
+  return handle(req, res);
+});
 const wss = new WebSocketServer({ noServer: true, maxPayload: 32 * 1024 * 1024 });
 
 server.on("upgrade", async (req, socket, head) => {
+  normalizeForwarded(req.headers, req.socket.remoteAddress, proxyTrust);
   if (!req.url?.startsWith("/ws/codex")) return nextUpgrade(req, socket, head);
   const reject = (code: string) => {
     socket.write(`HTTP/1.1 ${code}\r\n\r\n`);
@@ -55,7 +69,7 @@ server.on("upgrade", async (req, socket, head) => {
     token = readFileSync(`${tokensDir}/${user}.token`, "utf8").trim();
   } catch {
     // No harness yet: with a provisioner, start making one (the UI polls /api/harness and shows "preparing").
-    if (provisioningEnabled()) {
+    if (managedHarness(user)) {
       ensureHarness({ id: user, email: session.user.email, name: session.user.name });
       return reject("503 Service Unavailable");
     }
@@ -88,7 +102,7 @@ server.on("upgrade", async (req, socket, head) => {
     upstream.on("error", (e) => {
       console.error(`harness-${user}: ${e.message}`);
       // The container is gone or never started: a provisioner recreates it (idempotent, volumes are kept).
-      if (provisioningEnabled() && /ENOTFOUND|EAI_AGAIN|ECONNREFUSED|EHOSTUNREACH/.test(e.message)) ensureHarness({ id: user, email: session.user.email, name: session.user.name });
+      if (managedHarness(user) && /ENOTFOUND|EAI_AGAIN|ECONNREFUSED|EHOSTUNREACH/.test(e.message)) ensureHarness({ id: user, email: session.user.email, name: session.user.name });
       closeBoth();
     });
   });

@@ -5,6 +5,7 @@ import { twoFactor } from "better-auth/plugins";
 import { chooseHarnessId, isAdmin, isValidHarnessId, legacyHarnessId, parseList } from "./identity";
 import { localLoginEnabled, OIDC_PROVIDER_ID, oidcEnv, oidcPlugin, setupOidcTables } from "./oidc";
 import { secondFactorPlugin, secondFactorSessionHooks } from "./second-factor";
+import { trustedHops } from "./client-ip";
 import { cleanupSecondFactor, secondFactorRequired, setupSecondFactorTables } from "./second-factor-core";
 
 const publicUrl = process.env.PUBLIC_URL ?? "http://localhost:3000";
@@ -53,7 +54,10 @@ const options = {
   rateLimit: { enabled: true, window: 60, max: 30 },
   // Снаружи морда стоит за Traefik (LAN) и edge-nginx (docker): IP клиента берём из X-Forwarded-For справа налево
   // до первого не нашего адреса. Без этого лимит попыток входа общий на всех — и перебор, и блокировка всех сразу.
-  advanced: { ipAddress: { ipAddressHeaders: ["x-forwarded-for"], trustedProxies: ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"] } },
+  // server.ts has already rewritten X-Forwarded-For from the TCP peer (lib/client-ip.ts): only TRUSTED_PROXIES (the
+  // edge) may pass one through. Here only proxies in front of the edge are skipped (TRUSTED_PROXY_HOPS, default none);
+  // trusting all private ranges let any harness on a Docker network pick its own client address.
+  advanced: { ipAddress: { ipAddressHeaders: ["x-forwarded-for"], trustedProxies: trustedHops(process.env.TRUSTED_PROXY_HOPS) } },
   // 2FA по TOTP (Authy, Google Authenticator, 1Password): включается в Настройки → Вход в морду.
   // Включается сразу после «Включить»: показали QR, пользователь добавил его в Authy — готово, без ввода кода в настройках.
   plugins: [

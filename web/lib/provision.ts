@@ -5,7 +5,7 @@ import { request as httpRequest, Agent } from "node:http";
 import { request as httpsRequest, Agent as HttpsAgent } from "node:https";
 import { existsSync } from "node:fs";
 import { connect } from "node:net";
-import { isValidHarnessId } from "./identity";
+import { OIDC_ID_RE } from "./identity";
 
 export type HarnessState =
   | { state: "ready" }
@@ -15,6 +15,10 @@ export type HarnessState =
 
 const provisionerUrl = () => (process.env.PROVISIONER_URL ?? "").replace(/\/+$/, "");
 export const provisioningEnabled = () => provisionerUrl() !== "";
+// Only SSO users' harnesses (u-<12 hex>) are provisioned. A legacy harness (add-user.sh, on core) is "unmanaged":
+// web never asks the provisioner about it, whatever happens to its container.
+export const isProvisionedId = (id: unknown): id is string => typeof id === "string" && OIDC_ID_RE.test(id);
+export const managedHarness = (id: unknown): id is string => provisioningEnabled() && isProvisionedId(id);
 const tokensDir = () => process.env.TOKENS_DIR ?? "/run/secrets/tokens";
 const codexHost = () => process.env.CODEX_HOST_TEMPLATE ?? "harness-{user}:4500";
 const timeoutMs = () => Number(process.env.PROVISION_TIMEOUT_MS) > 0 ? Number(process.env.PROVISION_TIMEOUT_MS) : 120_000;
@@ -88,7 +92,7 @@ async function provision(id: string, email: string, name: string): Promise<void>
 
 // Start (or join) provisioning for a user; never throws. A failed run can be retried by calling again.
 export function ensureHarness(user: { id: string; email: string; name?: string | null }): Run | null {
-  if (!provisioningEnabled() || !isValidHarnessId(user.id)) return null;
+  if (!managedHarness(user.id)) return null;
   const cur = runs.get(user.id);
   if (cur && !cur.error) return cur;
   const run: Run = { since: Date.now(), result: Promise.resolve() };
@@ -109,7 +113,7 @@ export function ensureHarness(user: { id: string; email: string; name?: string |
 // What the UI should show for this user right now. Starts provisioning when the harness is missing or silent;
 // after a failure it reports the error until the user asks to retry.
 export async function harnessState(user: { id: string; email: string; name?: string | null }, retry = false): Promise<HarnessState> {
-  if (!provisioningEnabled()) return { state: "unmanaged" };
+  if (!managedHarness(user.id)) return { state: "unmanaged" };
   const cur = runs.get(user.id);
   if (cur?.error && !retry) return { state: "failed", error: cur.error };
   if (cur?.error) runs.delete(user.id);

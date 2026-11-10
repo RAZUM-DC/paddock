@@ -58,7 +58,7 @@ test("normalizeForwarded: untrusted peers lose every forwarding header, trusted 
 
 test("server.ts normalises every request except /api/harness/*, and every WS upgrade", () => {
   const src = readFileSync(new URL("../server.ts", import.meta.url), "utf8");
-  assert.match(src, /if \(isHarnessApiPath\(req\.url\)\) return void harnessApi\(req, res\);\n\s*normalizeForwarded\(req\.headers, req\.socket\.remoteAddress, proxyTrust\);\n\s*return handle\(req, res\);/);
+  assert.match(src, /if \(isHarnessApiPath\(req\.url\)\) return void harnessApi\(req, res\);\n\s*normalizeForwarded\(req\.headers, req\.socket\.remoteAddress, proxyTrust\);\n\s*if \(isGatePath\(req\.url\)\) return void gate\(req, res\);\n\s*return handle\(req, res\);/);
   assert.match(src, /server\.on\("upgrade", async \(req, socket, head\) => \{\n\s*normalizeForwarded\(req\.headers, req\.socket\.remoteAddress, proxyTrust\);/);
   assert.match(src, /parseTrustList\(process\.env\.TRUSTED_PROXIES \?\? DEFAULT_TRUSTED_PROXIES\)/);
   // The edge's name is resolved at start and again later (a recreated edge may get a new address).

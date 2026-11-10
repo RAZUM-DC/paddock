@@ -101,6 +101,20 @@ const oidcAdminOf = (issuer: string, userId: string) =>
   (ensureOwnTables(), db.prepare(`SELECT i.admin FROM "account" a JOIN oidc_identities i ON i.sub = a."accountId" AND i.issuer = ?
     WHERE a."userId" = ? AND a."providerId" = ?`).get(issuer, userId, OIDC_PROVIDER_ID) as { admin: number } | undefined)?.admin === 1;
 
+// The OIDC groups of a user as of their last OIDC login ([] without OIDC or for a password-only user).
+export function oidcGroupsOf(userId: string): string[] {
+  if (!oidc) return [];
+  ensureOwnTables();
+  const row = db.prepare(`SELECT i.groups FROM "account" a JOIN oidc_identities i ON i.sub = a."accountId" AND i.issuer = ?
+    WHERE a."userId" = ? AND a."providerId" = ?`).get(oidc.issuer, userId, OIDC_PROVIDER_ID) as { groups: string } | undefined;
+  try {
+    const g = JSON.parse(row?.groups ?? "[]");
+    return Array.isArray(g) ? g.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 // The harness of a signed-in user: harness-<id>, secrets/tokens/<id>.token. Throws when there is none — callers answer 403.
 export function harnessIdOf(user: SessionUser): string {
   const row = storedHarness.get(user.id) as { harness_id: string } | undefined;

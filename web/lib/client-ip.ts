@@ -90,3 +90,13 @@ export function trustedHops(raw: string | undefined): string[] {
   const s = parseTrustList(raw);
   return [...s.addresses, ...s.cidrs];
 }
+
+// The client as better-auth sees it: X-Forwarded-For (already normalised by server.ts) right to left, skipping the
+// proxies in front of the edge (TRUSTED_PROXY_HOPS). "" when there is nothing usable.
+export function clientAddress(xff: string | string[] | undefined, hops: string[]): string {
+  const chain = (Array.isArray(xff) ? xff.join(",") : xff ?? "").split(",").map((x) => peerAddress(x)).filter((x) => isIP(x));
+  const spec = parseTrustList(hops.join(","));
+  const skip = blockList(spec.addresses, spec.cidrs);
+  for (let i = chain.length - 1; i >= 0; i--) if (!skip.check(chain[i], isIP(chain[i]) === 6 ? "ipv6" : "ipv4")) return chain[i];
+  return "";
+}

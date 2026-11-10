@@ -4,10 +4,11 @@ import { Agent, createServer, type IncomingHttpHeaders } from "node:http";
 import { readFileSync } from "node:fs";
 import next from "next";
 import { WebSocketServer, WebSocket, type RawData } from "ws";
-import { db, ensureDb, harnessIdOf, sessionFromHeaders } from "./lib/auth";
+import { db, ensureDb, harnessIdOf, isAdminUser, oidcGroupsOf, sessionFromHeaders } from "./lib/auth";
 import { ensureHarness, managedHarness } from "./lib/provision";
 import { createHarnessApi, isHarnessApiPath } from "./lib/harness-api";
-import { DEFAULT_TRUSTED_PROXIES, normalizeForwarded, parseTrustList, ProxyTrust } from "./lib/client-ip";
+import { clientAddress, DEFAULT_TRUSTED_PROXIES, normalizeForwarded, parseTrustList, ProxyTrust, trustedHops } from "./lib/client-ip";
+import { createGate, isGatePath } from "./lib/gate";
 import { gitAccounts, harnessApiEnabled, secretRequests } from "./lib/harness-services";
 
 const dev = process.env.NODE_ENV !== "production";
@@ -39,10 +40,20 @@ const nextUpgrade = app.getUpgradeHandler();
 
 // /api/harness/*: harness containers only (git credentials, secret requests), handled before Next — see lib/harness-api.ts.
 const harnessApi = createHarnessApi({ enabled: harnessApiEnabled(), tokensDir, db, gitAccounts, secrets: secretRequests() });
+// /api/gate/<app>: forward-auth for other apps on this host (lib/gate.ts); the user comes from the Cookie header only.
+const hops = trustedHops(process.env.TRUSTED_PROXY_HOPS);
+const gate = createGate({
+  session: sessionFromHeaders,
+  groupsOf: oidcGroupsOf,
+  isAdmin: isAdminUser,
+  harnessOf: harnessIdOf,
+  clientAddress: (req) => clientAddress(req.headers["x-forwarded-for"], hops),
+});
 // /api/harness/* sees the raw headers (it refuses any forwarding header); everything else gets them normalised.
 const server = createServer((req, res) => {
   if (isHarnessApiPath(req.url)) return void harnessApi(req, res);
   normalizeForwarded(req.headers, req.socket.remoteAddress, proxyTrust);
+  if (isGatePath(req.url)) return void gate(req, res);
   return handle(req, res);
 });
 const wss = new WebSocketServer({ noServer: true, maxPayload: 32 * 1024 * 1024 });

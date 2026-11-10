@@ -121,6 +121,20 @@ From an independent review ("enable with fixes"):
     - W27: the address-family guard in `isTrusted` is redundant because `BlockList.check` returns false for
       non-addresses.
 
+### Gate for other apps (branch `razum/g017-gate`)
+
+`GET /api/gate/<app>` is a forward-auth check, so that Caddy can put an app without its own login (e.g. an IDE on
+`:8443`) behind Paddock's session. It answers:
+
+- 204 with `X-Gate-User-Id` / `X-Gate-User-Email` / `X-Gate-Harness` when the user is allowed;
+- 401 when there is no session or the second factor is pending;
+- 403 when the user is not allowed;
+- 404 when the app is not configured.
+
+Who is allowed is set by `GATE_<APP>_EMAILS` / `_GROUPS` / `_ADMINS=1`. Only the Cookie header identifies the user.
+Every answer is no-store, and failures are limited per client address. Tests: `web/test/gate.test.mjs`. Mutation
+testing: 22 mutants, all killed. Runbook and Caddy config: [g017-gate.md](g017-gate.md).
+
 ## Env vars
 
 | where | var | default | meaning |
@@ -142,6 +156,7 @@ From an independent review ("enable with fixes"):
 | provisioner | `PROVISIONER_TOKEN` | — (required) | |
 | web | `TRUSTED_PROXIES` | `127.0.0.1,::1,edge` (override: `127.0.0.1,::1,${PADDOCK_EDGE_IP}`) | peers whose `X-Forwarded-For` is kept (IPs, CIDRs, host names re-resolved every 60 s); everyone else's forwarding headers are replaced by the TCP peer |
 | web | `TRUSTED_PROXY_HOPS` | empty | IPs/CIDRs of proxies in front of the edge (e.g. a TLS front), skipped by better-auth inside `X-Forwarded-For` |
+| web | `GATE_<APP>_EMAILS` / `GATE_<APP>_GROUPS` / `GATE_<APP>_ADMINS` | unset (app → 404) | who passes `/api/gate/<app>` (g017-gate.md) |
 | provisioner | `HARNESS_IMAGE`, `HARNESS_MEMORY`, `HARNESS_CPUS`, `HARNESS_PIDS_LIMIT` | `paddock-harness-codex`, `4g`, `2`, `512` | swap = memory (none extra); json-file logs 3 × 10 MB |
 | provisioner | `MAX_HARNESSES` | `0` (no cap) | a new harness beyond N managed containers gets 409 |
 | provisioner | `DOCKER_API_VERSION` | `v1.44` | Engine API version used in request paths |

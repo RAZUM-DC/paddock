@@ -61,8 +61,10 @@ Before=docker.service
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/sbin/nft -f /etc/nftables.d/paddock-guard.nft
-# Loading the file empties egress_macs: refill it (fails harmlessly at boot, before Docker; the watcher fills it then).
-ExecStartPost=-/usr/local/sbin/paddock-guard-egress-sync.sh
+# Loading the file empties egress_macs: refill it, but only while Docker is already running. At boot this unit runs
+# before docker.service, and `docker inspect` in the sync script socket-activates Docker, which waits for this unit:
+# the boot hangs and Docker never starts (seen on plat-agents-01, 12.11.2026). At boot the watcher fills the set.
+ExecStartPost=-/bin/sh -c 'systemctl is-active --quiet docker.service && exec /usr/local/sbin/paddock-guard-egress-sync.sh; exit 0'
 ExecReload=/usr/sbin/nft -f /etc/nftables.d/paddock-guard.nft
 ExecReload=-/usr/local/sbin/paddock-guard-egress-sync.sh
 ExecStop=/usr/sbin/nft delete table inet paddock_guard
@@ -103,6 +105,15 @@ WantedBy=timers.target
 ```
 
 `systemctl daemon-reload && systemctl enable --now paddock-guard paddock-guard-egress-watch paddock-guard-egress-sync.timer`.
+
+A host installed before this fix (unit with a bare `ExecStartPost=-/usr/local/sbin/paddock-guard-egress-sync.sh`) does not come back after a reboot. Replace the unit with the one above, or add a drop-in that overrides only that line, then `systemctl daemon-reload`:
+
+```ini
+# /etc/systemd/system/paddock-guard.service.d/10-g022-boot.conf (as installed on plat-agents-01)
+[Service]
+ExecStartPost=
+ExecStartPost=-/bin/sh -c 'systemctl is-active --quiet docker.service && exec /usr/local/sbin/paddock-guard-egress-sync.sh; exit 0'
+```
 After editing the rules, use `systemctl reload paddock-guard` (it re-syncs at once) or `restart` (which also
 restarts the watcher, via `PartOf=`). A bare `nft -f` leaves `egress_macs` empty until the next timer tick (≤ 1 min). Check with `nft list set inet paddock_guard egress_macs`: one MAC per `paddock-u-*` network of egress, the
 same as `docker inspect -f '{{range $n, $e := .NetworkSettings.Networks}}{{$n}} {{$e.MacAddress}}{{"\n"}}{{end}}' paddock-egress`. Do **not** include the file from a stock
